@@ -53,7 +53,12 @@ async def poll_device(
 async def latest_metric(
     device_id: uuid.UUID, service: MonitoringSvc, _: ActiveUser
 ) -> DeviceMetricOut:
-    metric = await service.get_latest(device_id)
+    try:
+        metric = await service.get_latest(device_id)
+    except EntityNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+        ) from exc
     if metric is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -74,5 +79,10 @@ async def metric_history(
     skip: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
 ) -> list[DeviceMetricOut]:
-    metrics = await service.get_history(device_id, skip=skip, limit=limit)
+    try:
+        metrics = await service.get_history(device_id, skip=skip, limit=limit)
+    except EntityNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+        ) from exc
     return [DeviceMetricOut.model_validate(m) for m in metrics]

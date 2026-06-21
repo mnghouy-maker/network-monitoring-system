@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from datetime import UTC, datetime
 
 import pytest
 
@@ -20,6 +21,15 @@ from app.models.device import Device, DeviceCategory  # noqa: E402
 from app.models.metric import DeviceMetric  # noqa: E402
 from app.models.user import User  # noqa: E402
 from app.monitoring.types import MetricSample, PingResult  # noqa: E402
+
+
+def _apply_timestamps(obj: object) -> None:
+    """Populate ``created_at``/``updated_at`` the way DB server defaults would."""
+    now = datetime.now(UTC)
+    if getattr(obj, "created_at", None) is None:
+        obj.created_at = now  # type: ignore[attr-defined]
+    if getattr(obj, "updated_at", None) is None:
+        obj.updated_at = now  # type: ignore[attr-defined]
 
 
 class FakeUserRepository:
@@ -47,6 +57,12 @@ class FakeUserRepository:
     async def add(self, user: User) -> User:
         if user.id is None:
             user.id = uuid.uuid4()
+        # Mimic DB server defaults so response models can serialize.
+        _apply_timestamps(user)
+        if user.is_active is None:
+            user.is_active = True
+        if user.is_superuser is None:
+            user.is_superuser = False
         self._by_id[user.id] = user
         return user
 
@@ -104,6 +120,7 @@ class FakeDeviceRepository:
         # Apply column defaults the DB would normally provide.
         if device.is_active is None:
             device.is_active = True
+        _apply_timestamps(device)
         self._by_id[device.id] = device
         return device
 
@@ -124,6 +141,8 @@ class FakeMetricRepository:
     async def add(self, metric: DeviceMetric) -> DeviceMetric:
         if metric.id is None:
             metric.id = uuid.uuid4()
+        if metric.collected_at is None:
+            metric.collected_at = datetime.now(UTC)
         self._items.append(metric)
         return metric
 

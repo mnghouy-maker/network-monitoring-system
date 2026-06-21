@@ -6,21 +6,30 @@ Zabbix templates differ between environments, so we match on common key
 prefixes and fall back to ``None`` when a metric is not templated.
 """
 
+import asyncio
 import logging
 from typing import Any
 
 from app.models.device import Device
+from app.monitoring.exceptions import (
+    CollectorConfigurationError,
+    CollectorError,
+)
 from app.monitoring.types import InterfaceSample, MetricSample
 
 logger = logging.getLogger(__name__)
 
 
-class ZabbixAuthError(RuntimeError):
-    """Raised when authentication against the Zabbix API fails."""
+class ZabbixApiError(CollectorError):
+    """Raised when the Zabbix API returns an error response."""
 
 
-class ZabbixNotConfiguredError(RuntimeError):
-    """Raised when a Zabbix poll is attempted without configuration."""
+class ZabbixNotConfiguredError(CollectorConfigurationError):
+    """Raised when a Zabbix poll is attempted without required configuration.
+
+    This is a caller/configuration error (e.g. the device has no
+    ``zabbix_host_id``) and surfaces to the API as a 400, not a silent degrade.
+    """
 
 
 class ZabbixMetricCollector:
@@ -46,6 +55,9 @@ class ZabbixMetricCollector:
         self._timeout = timeout_seconds
         self._auth_token: str | None = None
         self._request_id = 0
+        # Guards token (re)authentication: the collector is a process-wide
+        # singleton, so concurrent polls must not race on login.
+        self._auth_lock = asyncio.Lock()
 
     @property
     def is_configured(self) -> bool:
@@ -90,28 +102,32 @@ class ZabbixMetricCollector:
             body = response.json()
 
         if "error" in body:
-            raise ZabbixAuthError(str(body["error"]))
+            raise ZabbixApiError(str(body["error"]))
         return body["result"]
 
-    async def _ensure_auth(self) -> None:
-        if self._auth_token:
-            return
-        self._auth_token = await self._call(
-            "user.login",
-            {"username": self._user, "password": self._password},
-            auth=False,
-        )
+    async def _ensure_auth(self, *, force: bool = False) -> None:
+        """Acquire a session token, re-using a cached one unless ``force``."""
+        async with self._auth_lock:
+            if self._auth_token and not force:
+                return
+            self._auth_token = await self._call(
+                "user.login",
+                {"username": self._user, "password": self._password},
+                auth=False,
+            )
 
     async def _get_items(self, host_id: str) -> list[dict[str, Any]]:
+        params = {
+            "output": ["key_", "lastvalue", "name"],
+            "hostids": [host_id],
+        }
         await self._ensure_auth()
-        return await self._call(
-            "item.get",
-            {
-                "output": ["key_", "lastvalue", "name"],
-                "hostids": [host_id],
-            },
-            auth=True,
-        )
+        try:
+            return await self._call("item.get", params, auth=True)
+        except ZabbixApiError:
+            # The cached token may have expired; re-authenticate once and retry.
+            await self._ensure_auth(force=True)
+            return await self._call("item.get", params, auth=True)
 
     # --- mapping ----------------------------------------------------------
     def _map_items(self, items: list[dict[str, Any]]) -> MetricSample:

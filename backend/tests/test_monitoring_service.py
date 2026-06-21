@@ -6,6 +6,7 @@ import pytest
 
 from app.models.device import Device
 from app.models.metric import MetricSource
+from app.monitoring.exceptions import CollectorConfigurationError
 from app.monitoring.types import InterfaceSample, MetricSample, PingResult
 from app.services.exceptions import EntityNotFoundError, MonitoringError
 from app.services.monitoring import MonitoringService
@@ -121,6 +122,45 @@ async def test_collector_failure_degrades_gracefully(
     assert metric.packet_loss_percent == 100.0
     assert metric.cpu_load_percent is None
     assert metric.interfaces == []
+
+
+@pytest.mark.asyncio
+async def test_collector_configuration_error_becomes_monitoring_error(
+    fake_device_repo: FakeDeviceRepository,
+    fake_metric_repo: FakeMetricRepository,
+) -> None:
+    # A configuration error (e.g. missing zabbix_host_id / SNMPv3) must surface
+    # as MonitoringError (-> HTTP 400), not be silently degraded to a snapshot.
+    device = await _make_device(fake_device_repo)
+    zabbix = FakeMetricCollector(
+        error=CollectorConfigurationError("no zabbix_host_id")
+    )
+    service = MonitoringService(
+        fake_device_repo,  # type: ignore[arg-type]
+        fake_metric_repo,  # type: ignore[arg-type]
+        FakePingCollector(_reachable()),
+        FakeMetricCollector(),
+        zabbix_collector=zabbix,
+    )
+    with pytest.raises(MonitoringError):
+        await service.poll_device(device, source=MetricSource.ZABBIX)
+
+
+@pytest.mark.asyncio
+async def test_get_latest_unknown_device_raises(
+    fake_device_repo: FakeDeviceRepository,
+    fake_metric_repo: FakeMetricRepository,
+) -> None:
+    service = MonitoringService(
+        fake_device_repo,  # type: ignore[arg-type]
+        fake_metric_repo,  # type: ignore[arg-type]
+        FakePingCollector(_reachable()),
+        FakeMetricCollector(),
+    )
+    with pytest.raises(EntityNotFoundError):
+        await service.get_latest(uuid.uuid4())
+    with pytest.raises(EntityNotFoundError):
+        await service.get_history(uuid.uuid4())
 
 
 @pytest.mark.asyncio

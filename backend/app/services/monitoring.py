@@ -12,6 +12,7 @@ import uuid
 
 from app.models.device import Device
 from app.models.metric import DeviceMetric, InterfaceStat, MetricSource
+from app.monitoring.exceptions import CollectorConfigurationError
 from app.monitoring.protocols import MetricCollector, PingCollector
 from app.monitoring.types import MetricSample
 from app.repositories.device import DeviceRepository
@@ -57,6 +58,10 @@ class MonitoringService:
             sample = await collector.collect(device)
         except MonitoringError:
             raise
+        except CollectorConfigurationError as exc:
+            # Configuration/caller errors (e.g. SNMPv3 unsupported, missing
+            # zabbix_host_id) must surface as a 4xx, not be silently degraded.
+            raise MonitoringError(str(exc)) from exc
         except Exception as exc:  # noqa: BLE001 - degrade gracefully
             logger.warning(
                 "Metric collection (%s) failed for %s: %s",
@@ -110,12 +115,18 @@ class MonitoringService:
                 logger.warning("Polling %s failed: %s", device.name, exc)
         return results
 
+    async def _ensure_device_exists(self, device_id: uuid.UUID) -> None:
+        if await self._devices.get(device_id) is None:
+            raise EntityNotFoundError(f"Device {device_id} not found")
+
     async def get_latest(self, device_id: uuid.UUID) -> DeviceMetric | None:
+        await self._ensure_device_exists(device_id)
         return await self._metrics.get_latest(device_id)
 
     async def get_history(
         self, device_id: uuid.UUID, *, skip: int = 0, limit: int = 100
     ) -> list[DeviceMetric]:
+        await self._ensure_device_exists(device_id)
         return await self._metrics.list_history(
             device_id, skip=skip, limit=limit
         )
