@@ -24,3 +24,7 @@ class InvalidCredentialsError(ServiceError):
 
 class InactiveUserError(ServiceError):
     """Raised when an inactive user attempts to authenticate."""
+
+
+class MonitoringError(ServiceError):
+    """Raised when a monitoring poll cannot be performed as requested."""

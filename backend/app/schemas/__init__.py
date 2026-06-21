@@ -1,5 +1,7 @@
 """Pydantic schemas (request/response contracts)."""
 
+from app.schemas.device import DeviceCreate, DeviceOut, DeviceUpdate
+from app.schemas.metric import DeviceMetricOut, InterfaceStatOut
 from app.schemas.token import Token, TokenPayload, TokenRefreshRequest
 from app.schemas.user import (
     UserCreate,
@@ -14,4 +16,9 @@ __all__ = [
     "UserCreate",
     "UserOut",
     "UserUpdate",
+    "DeviceCreate",
+    "DeviceOut",
+    "DeviceUpdate",
+    "DeviceMetricOut",
+    "InterfaceStatOut",
 ]

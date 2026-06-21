@@ -3,21 +3,28 @@
 A self-hosted Network Operations Platform (NetOps). This repository is being
 built **one phase at a time**.
 
-> **Status: Phase 1 — Project Foundation ✅**
-> FastAPI backend, PostgreSQL integration, SQLAlchemy models, Alembic
-> migrations, and JWT authentication with role-based access control
-> (Admin / Operator / Viewer).
+> **Status: Phase 2 — Device Inventory & Network Monitoring ✅**
+> Device inventory (add/edit/delete/categorize, vendor & location), plus
+> monitoring of ping status, CPU, memory, uptime and interface statistics via
+> **SNMP** and **Zabbix**. Built on the Phase 1 foundation (FastAPI,
+> PostgreSQL, SQLAlchemy, Alembic, JWT/RBAC).
 
-Planned capabilities (future phases): Network Monitoring (Zabbix + SNMP),
-Telegram Alert Bot, Configuration Backup (Netmiko/Paramiko/NAPALM), Server
-Health Monitoring, an AI Troubleshooting Assistant, and a React/Tailwind
-dashboard.
+Planned capabilities (future phases): Telegram Alert Bot, Configuration Backup
+(Netmiko/Paramiko/NAPALM), Server Health Monitoring, an AI Troubleshooting
+Assistant, and a React/Tailwind dashboard.
+
+### Phase history
+
+| Phase | Scope | Status |
+|-------|-------|--------|
+| 1 | Project foundation: FastAPI, PostgreSQL, SQLAlchemy, Alembic, JWT/RBAC | ✅ |
+| 2 | Device inventory + network monitoring (SNMP & Zabbix) | ✅ |
 
 ---
 
 ## 1. Architecture
 
-Phase 1 establishes a **clean, layered architecture** with strict separation of
+The platform uses a **clean, layered architecture** with strict separation of
 concerns. Each layer depends only on the layer beneath it, and all collaborators
 are wired through FastAPI's dependency-injection system.
 
@@ -27,24 +34,25 @@ are wired through FastAPI's dependency-injection system.
    (Swagger / React /    │      app/main.py + CORS       │
     curl / Telegram)     └───────────────┬───────────────┘
                                           │
-                         ┌────────────────▼────────────────┐
-                         │        API layer (routers)        │   app/api/v1
-                         │  auth · users · health/ready      │
-                         └────────────────┬──────────────────┘
+                         ┌────────────────▼────────────────────┐
+                         │        API layer (routers)           │   app/api/v1
+                         │  auth · users · devices · monitoring │
+                         └────────────────┬─────────────────────┘
                                           │  Depends(...)  (DI)
-                         ┌────────────────▼──────────────────┐
-                         │     Service layer (business logic) │   app/services
-                         │  AuthService · UserService         │
-                         └────────────────┬──────────────────┘
-                                          │
-                         ┌────────────────▼──────────────────┐
-                         │   Repository layer (data access)   │   app/repositories
-                         │  UserRepository (SQLAlchemy)       │
-                         └────────────────┬──────────────────┘
-                                          │  async session (unit of work)
-                         ┌────────────────▼──────────────────┐
-                         │           PostgreSQL 16            │
-                         └────────────────────────────────────┘
+                         ┌────────────────▼─────────────────────┐
+                         │     Service layer (business logic)    │   app/services
+                         │  Auth · User · Device · Monitoring    │
+                         └───────┬──────────────────────┬────────┘
+                                 │                      │
+              ┌──────────────────▼─────────┐   ┌────────▼──────────────────┐
+              │  Repository layer (data)   │   │  Monitoring collectors     │  app/monitoring
+              │  User · Device · Metric    │   │  Ping · SNMP · Zabbix      │
+              └──────────────────┬─────────┘   └────────┬──────────────────┘
+                                 │                      │
+              ┌──────────────────▼─────────┐   ┌────────▼──────────────────┐
+              │        PostgreSQL 16        │   │ ICMP · SNMP agents ·       │
+              │  users · devices · metrics  │   │ Zabbix API (network)       │
+              └────────────────────────────┘   └────────────────────────────┘
 
    Cross-cutting:  app/core  →  config (env vars) · security (JWT/bcrypt) · DI
    Migrations:     alembic/  →  schema versioning
@@ -57,11 +65,23 @@ are wired through FastAPI's dependency-injection system.
 | **API** | HTTP concerns, status codes, serialization | Thin controllers, easy to read |
 | **Service** | Business rules, orchestration | Framework-agnostic, unit-testable |
 | **Repository** | All DB queries | Swappable persistence, mockable |
+| **Collectors** | Talk to ICMP/SNMP/Zabbix (infra) | Pluggable behind `Protocol`s, fakeable |
 | **Core** | Config, security, DI wiring | Single source of truth for secrets |
 
-This boundary is what lets the unit tests run **without a database** — services
-talk to a `UserRepository` interface, which the tests replace with an in-memory
-fake.
+This boundary is what lets the unit tests run **without a database or network** —
+services talk to repository and collector *interfaces*, which the tests replace
+with in-memory/preset fakes.
+
+### Monitoring design
+
+`MonitoringService` always probes reachability with the **ping collector**, then
+collects health gauges (CPU, memory, uptime) and **interface statistics** from
+the requested **source** — `SNMP` (default) or `Zabbix`. Collectors implement a
+common `MetricCollector` protocol so they are interchangeable. Heavy third-party
+clients (`puresnmp`, `httpx`) are **imported lazily** inside the collectors, so
+importing the app or running the tests never requires them. A collector failure
+degrades gracefully: the snapshot is still written with `reachable` recorded and
+the unavailable gauges left `null`, rather than aborting the poll.
 
 ---
 
@@ -85,46 +105,70 @@ network-monitoring-system/
     │   ├── env.py              # reads DB URL + metadata from the app
     │   ├── script.py.mako
     │   └── versions/
-    │       └── 0001_create_users_table.py
+    │       ├── 0001_create_users_table.py
+    │       └── 0002_devices_and_metrics.py     # Phase 2
     ├── app/
     │   ├── main.py             # app factory, lifespan, admin bootstrap
     │   ├── core/
     │   │   ├── config.py       # pydantic-settings (env vars)
     │   │   ├── security.py     # bcrypt + JWT
-    │   │   └── dependencies.py # DI: sessions, services, auth guards
+    │   │   └── dependencies.py # DI: sessions, repos, services, collectors
     │   ├── db/
     │   │   ├── base.py         # DeclarativeBase + TimestampMixin
     │   │   └── session.py      # async engine + unit-of-work session
     │   ├── models/
-    │   │   └── user.py         # User model + UserRole enum
+    │   │   ├── user.py         # User + UserRole
+    │   │   ├── device.py       # Device + DeviceCategory/SNMPVersion  (Phase 2)
+    │   │   └── metric.py       # DeviceMetric + InterfaceStat          (Phase 2)
     │   ├── schemas/
-    │   │   ├── user.py         # request/response contracts
-    │   │   └── token.py
+    │   │   ├── user.py · token.py
+    │   │   ├── device.py        # device contracts                    (Phase 2)
+    │   │   └── metric.py        # metric/interface contracts          (Phase 2)
     │   ├── repositories/
-    │   │   └── user.py
-    │   ├── services/
-    │   │   ├── auth.py
     │   │   ├── user.py
-    │   │   └── exceptions.py   # framework-agnostic domain errors
+    │   │   ├── device.py                                              # (Phase 2)
+    │   │   └── metric.py                                              # (Phase 2)
+    │   ├── services/
+    │   │   ├── auth.py · user.py · exceptions.py
+    │   │   ├── device.py        # inventory business rules            (Phase 2)
+    │   │   └── monitoring.py    # poll orchestration + persistence    (Phase 2)
+    │   ├── monitoring/          # collector infrastructure            (Phase 2)
+    │   │   ├── protocols.py     # PingCollector / MetricCollector
+    │   │   ├── types.py         # PingResult / MetricSample / Interface
+    │   │   ├── ping.py          # subprocess ICMP collector
+    │   │   ├── snmp.py          # SNMP collector (lazy puresnmp)
+    │   │   └── zabbix.py        # Zabbix API collector (lazy httpx)
     │   └── api/
     │       └── v1/
     │           ├── router.py
     │           └── endpoints/
-    │               ├── auth.py    # /login /refresh /me
-    │               ├── users.py   # admin-only CRUD
-    │               └── health.py  # /health /ready
+    │               ├── auth.py · users.py · health.py
+    │               ├── devices.py     # inventory CRUD                (Phase 2)
+    │               └── monitoring.py  # poll / latest / history       (Phase 2)
     └── tests/
-        ├── conftest.py            # in-memory fake repository
+        ├── conftest.py            # in-memory repo + collector fakes
         ├── test_security.py
         ├── test_user_service.py
-        └── test_auth_service.py
+        ├── test_auth_service.py
+        ├── test_device_service.py        # (Phase 2)
+        ├── test_monitoring_service.py     # (Phase 2)
+        └── test_ping_collector.py         # (Phase 2)
 ```
 
 ---
 
 ## 3. Database Schema
 
-Phase 1 contains a single table: **`users`**.
+Tables: **`users`** (Phase 1), **`devices`**, **`device_metrics`**,
+**`interface_stats`** (Phase 2).
+
+```
+ users                devices ──1:N──► device_metrics ──1:N──► interface_stats
+ (auth/RBAC)          (inventory)      (poll snapshots)        (per-interface)
+```
+
+Both monitoring foreign keys are `ON DELETE CASCADE`, so deleting a device
+removes its metrics, and removing a metric snapshot removes its interface rows.
 
 ### `users`
 
@@ -154,9 +198,60 @@ Phase 1 contains a single table: **`users`**.
 `is_superuser` always bypasses role checks. The bootstrap admin created on first
 startup is an Admin **and** a superuser.
 
+### `devices`
+
+| Column | Type | Constraints |
+|--------|------|-------------|
+| `id` | `UUID` | PK, default `uuid4()` |
+| `name` | `VARCHAR(255)` | NOT NULL, UNIQUE, indexed |
+| `hostname` | `VARCHAR(255)` | NOT NULL (IP or DNS) |
+| `category` | `device_category` (ENUM) | NOT NULL, default `other`, indexed |
+| `vendor` | `VARCHAR(100)` | NULL |
+| `model` | `VARCHAR(100)` | NULL |
+| `location` | `VARCHAR(255)` | NULL |
+| `description` | `TEXT` | NULL |
+| `snmp_community` | `VARCHAR(255)` | NOT NULL, default `public` (write-only) |
+| `snmp_version` | `snmp_version` (ENUM) | NOT NULL, default `v2c` |
+| `snmp_port` | `INTEGER` | NOT NULL, default `161` |
+| `zabbix_host_id` | `VARCHAR(64)` | NULL (maps to a Zabbix host) |
+| `is_active` | `BOOLEAN` | NOT NULL, default `true` |
+| `created_at` / `updated_at` | `TIMESTAMPTZ` | NOT NULL, managed |
+
+`device_category` = `router·switch·firewall·server·access_point·load_balancer·other`;
+`snmp_version` = `v1·v2c·v3`. The SNMP community is accepted on create/update but
+**excluded from responses** so the secret is not leaked in listings.
+
+### `device_metrics` (one row per poll)
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | `UUID` | PK |
+| `device_id` | `UUID` | FK → `devices.id`, CASCADE, indexed |
+| `collected_at` | `TIMESTAMPTZ` | indexed, default `now()` |
+| `source` | `metric_source` (ENUM) | `snmp` or `zabbix` |
+| `reachable` | `BOOLEAN` | from ICMP ping |
+| `latency_ms` / `packet_loss_percent` | `FLOAT` | ping results |
+| `cpu_load_percent` / `memory_used_percent` | `FLOAT` | nullable gauges |
+| `uptime_seconds` | `BIGINT` | nullable |
+
+### `interface_stats` (per interface, per poll)
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | `UUID` | PK |
+| `metric_id` | `UUID` | FK → `device_metrics.id`, CASCADE, indexed |
+| `if_index` | `INTEGER` | SNMP ifIndex |
+| `name` | `VARCHAR(255)` | interface name/descr |
+| `oper_status` | `VARCHAR(32)` | up/down/… |
+| `speed_bps` | `BIGINT` | link speed |
+| `in_octets` / `out_octets` | `BIGINT` | HC counters |
+| `in_errors` / `out_errors` | `BIGINT` | error counters |
+
 ---
 
-## 4. API Endpoints (Phase 1)
+## 4. API Endpoints
+
+### Phase 1 — auth & users
 
 | Method | Path                     | Auth          | Description                     |
 |--------|--------------------------|---------------|---------------------------------|
@@ -171,6 +266,22 @@ startup is an Admin **and** a superuser.
 | GET    | `/api/v1/users/{id}`     | Admin         | Get user                        |
 | PATCH  | `/api/v1/users/{id}`     | Admin         | Update user                     |
 | DELETE | `/api/v1/users/{id}`     | Admin         | Delete user                     |
+
+### Phase 2 — device inventory & monitoring
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET    | `/api/v1/devices` | any user | List devices (filter `?category=`, `?is_active=`) |
+| POST   | `/api/v1/devices` | Admin/Operator | Add a device |
+| GET    | `/api/v1/devices/{id}` | any user | Get a device |
+| PATCH  | `/api/v1/devices/{id}` | Admin/Operator | Edit a device |
+| DELETE | `/api/v1/devices/{id}` | Admin/Operator | Delete a device |
+| POST   | `/api/v1/monitoring/devices/{id}/poll` | Admin/Operator | Poll now (`?source=snmp\|zabbix`) |
+| GET    | `/api/v1/monitoring/devices/{id}/latest` | any user | Latest metric snapshot |
+| GET    | `/api/v1/monitoring/devices/{id}/history` | any user | Metric history |
+
+"any user" = any authenticated, active user (Viewer included). Polling and
+inventory writes are operational actions restricted to Admin/Operator.
 
 Interactive docs are served at **`/docs`** (Swagger UI) and **`/redoc`**.
 
@@ -200,6 +311,21 @@ On first boot the backend container automatically:
 1. waits for Postgres to be healthy,
 2. runs `alembic upgrade head`, and
 3. creates the bootstrap admin from `FIRST_ADMIN_*`.
+
+#### Optional: bundled Zabbix stack
+
+The Zabbix server, web UI and its database are behind the `monitoring` compose
+profile so the core stack stays light:
+
+```bash
+docker compose --profile monitoring up --build
+```
+
+Zabbix web is published on `http://localhost:8080` (default login `Admin` /
+`zabbix`). To let the backend poll via Zabbix, set in `.env`:
+`ZABBIX_URL=http://zabbix-web:8080`, `ZABBIX_USER=Admin`, `ZABBIX_PASSWORD=...`,
+then poll a device with `?source=zabbix`. Without these, monitoring works via
+direct **SNMP** (the default source) and ICMP ping out of the box.
 
 ### Option B — Local development (without Docker)
 
@@ -236,15 +362,24 @@ endpoints.
 cd backend
 pip install -r requirements-dev.txt
 
-pytest            # unit tests (no database required)
+pytest            # unit tests (no database or network required)
 ruff check .      # lint
 mypy app          # static type checks
 ```
 
-The unit tests cover password hashing, JWT creation/verification, user-service
-business rules (uniqueness, role/password updates, admin bootstrap), and the
-authentication flow (login by username/email, inactive accounts, token refresh,
-and rejecting an access token at the refresh endpoint).
+The unit tests cover:
+* **Auth/users (Phase 1):** password hashing, JWT creation/verification,
+  user-service rules (uniqueness, role/password updates, admin bootstrap), and
+  the login flow (username/email, inactive accounts, refresh rotation, and
+  rejecting an access token at the refresh endpoint).
+* **Inventory (Phase 2):** device create/update/delete, name-uniqueness
+  conflicts, category filtering.
+* **Monitoring (Phase 2):** poll orchestration and persistence, SNMP-vs-Zabbix
+  source selection, the "Zabbix requested but unconfigured" error, graceful
+  degradation when a collector fails, and the ping output parser.
+
+Collectors and repositories are swapped for in-memory/preset fakes, so the whole
+suite runs without Postgres, an SNMP agent, or a Zabbix server.
 
 ---
 
@@ -276,9 +411,34 @@ and rejecting an access token at the refresh endpoint).
 10. **App factory + lifespan bootstrap** so the platform is reachable
     immediately after a clean deploy (no manual first-user step).
 
+### Phase 2 additions
+
+11. **Pluggable collectors behind `Protocol`s.** Ping, SNMP and Zabbix
+    collectors share interfaces (`PingCollector`, `MetricCollector`), so the
+    monitoring service treats SNMP and Zabbix interchangeably and tests inject
+    fakes. No collector knows about HTTP or the database.
+12. **Lazy third-party imports.** `puresnmp` and `httpx` are imported *inside*
+    collector methods, so importing the app (and the test suite) never requires
+    the heavy/optional clients — only an actual poll does.
+13. **Graceful degradation.** A failed metric collection still records a
+    snapshot with reachability and null gauges, so a flapping device never
+    breaks a poll cycle (`poll_all_active` also isolates per-device failures).
+14. **Snapshot-per-poll time series.** `device_metrics` + `interface_stats`
+    store history (not just "latest"), enabling future dashboards/trends without
+    a schema change. Indexed on `device_id` and `collected_at`.
+15. **Secret hygiene for devices.** The SNMP community is writable but excluded
+    from API responses, matching how `hashed_password` is never serialized.
+16. **OS `ping` over raw sockets.** Reachability uses the system `ping` binary
+    (granted `cap_net_raw` in the image) so the app needs no root and no extra
+    Python ICMP stack.
+17. **Optional Zabbix via compose profile.** The Zabbix stack is opt-in
+    (`--profile monitoring`); the platform is fully functional with SNMP alone.
+
 ---
 
 ## 8. Next Steps
 
-Phase 1 is complete. **Awaiting approval before starting Phase 2** (Network
-Monitoring with Zabbix + SNMP).
+Phase 2 is complete. **Awaiting approval before starting Phase 3** (Telegram
+Alert Bot). Possible follow-ups within monitoring (deferred until requested):
+scheduled background polling, counter-delta → bandwidth/error-rate derivation,
+and alert thresholds.

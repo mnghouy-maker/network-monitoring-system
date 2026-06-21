@@ -56,6 +56,25 @@ class Settings(BaseSettings):
             return [origin.strip() for origin in value.split(",") if origin.strip()]
         return value
 
+    # --- Monitoring: SNMP defaults ----------------------------------------
+    # Per-device values override these; they are sensible fallbacks only.
+    SNMP_DEFAULT_COMMUNITY: str = "public"
+    SNMP_DEFAULT_PORT: int = 161
+    SNMP_TIMEOUT_SECONDS: float = 2.0
+    SNMP_RETRIES: int = 1
+
+    # --- Monitoring: ICMP ping --------------------------------------------
+    PING_COUNT: int = 3
+    PING_TIMEOUT_SECONDS: float = 2.0
+
+    # --- Monitoring: Zabbix API -------------------------------------------
+    # Optional. When configured, devices can be polled via the Zabbix API.
+    ZABBIX_URL: str | None = None
+    ZABBIX_USER: str | None = None
+    ZABBIX_PASSWORD: str | None = None
+    ZABBIX_VERIFY_TLS: bool = True
+    ZABBIX_TIMEOUT_SECONDS: float = 10.0
+
     # --- Database ---------------------------------------------------------
     POSTGRES_SERVER: str = "db"
     POSTGRES_PORT: int = 5432

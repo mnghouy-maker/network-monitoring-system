@@ -8,6 +8,7 @@ own collaborators, which keeps them thin and testable.
 
 import uuid
 from collections.abc import Awaitable, Callable
+from functools import lru_cache
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, status
@@ -18,8 +19,16 @@ from app.core.config import settings
 from app.core.security import ACCESS_TOKEN_TYPE, decode_token
 from app.db.session import get_session
 from app.models.user import User, UserRole
+from app.monitoring.ping import SubprocessPingCollector
+from app.monitoring.protocols import MetricCollector, PingCollector
+from app.monitoring.snmp import SnmpMetricCollector
+from app.monitoring.zabbix import ZabbixMetricCollector
+from app.repositories.device import DeviceRepository
+from app.repositories.metric import MetricRepository
 from app.repositories.user import UserRepository
 from app.services.auth import AuthService
+from app.services.device import DeviceService
+from app.services.monitoring import MonitoringService
 from app.services.user import UserService
 
 # tokenUrl is used by Swagger UI's "Authorize" button.
@@ -36,7 +45,45 @@ def get_user_repository(session: DbSession) -> UserRepository:
     return UserRepository(session)
 
 
+def get_device_repository(session: DbSession) -> DeviceRepository:
+    return DeviceRepository(session)
+
+
+def get_metric_repository(session: DbSession) -> MetricRepository:
+    return MetricRepository(session)
+
+
 UserRepo = Annotated[UserRepository, Depends(get_user_repository)]
+DeviceRepo = Annotated[DeviceRepository, Depends(get_device_repository)]
+MetricRepo = Annotated[MetricRepository, Depends(get_metric_repository)]
+
+
+# --- Collectors (process-wide singletons, configured from settings) ----------
+@lru_cache
+def get_ping_collector() -> PingCollector:
+    return SubprocessPingCollector(
+        count=settings.PING_COUNT,
+        timeout_seconds=settings.PING_TIMEOUT_SECONDS,
+    )
+
+
+@lru_cache
+def get_snmp_collector() -> MetricCollector:
+    return SnmpMetricCollector(
+        timeout_seconds=settings.SNMP_TIMEOUT_SECONDS,
+        retries=settings.SNMP_RETRIES,
+    )
+
+
+@lru_cache
+def get_zabbix_collector() -> ZabbixMetricCollector:
+    return ZabbixMetricCollector(
+        url=settings.ZABBIX_URL,
+        user=settings.ZABBIX_USER,
+        password=settings.ZABBIX_PASSWORD,
+        verify_tls=settings.ZABBIX_VERIFY_TLS,
+        timeout_seconds=settings.ZABBIX_TIMEOUT_SECONDS,
+    )
 
 
 # --- Services -----------------------------------------------------------------
@@ -48,8 +95,29 @@ def get_auth_service(repo: UserRepo) -> AuthService:
     return AuthService(repo)
 
 
+def get_device_service(repo: DeviceRepo) -> DeviceService:
+    return DeviceService(repo)
+
+
+def get_monitoring_service(
+    device_repo: DeviceRepo, metric_repo: MetricRepo
+) -> MonitoringService:
+    zabbix = get_zabbix_collector()
+    return MonitoringService(
+        device_repo=device_repo,
+        metric_repo=metric_repo,
+        ping_collector=get_ping_collector(),
+        snmp_collector=get_snmp_collector(),
+        zabbix_collector=zabbix if zabbix.is_configured else None,
+    )
+
+
 UserSvc = Annotated[UserService, Depends(get_user_service)]
 AuthSvc = Annotated[AuthService, Depends(get_auth_service)]
+DeviceSvc = Annotated[DeviceService, Depends(get_device_service)]
+MonitoringSvc = Annotated[
+    MonitoringService, Depends(get_monitoring_service)
+]
 
 
 # --- Current user / auth guards ----------------------------------------------

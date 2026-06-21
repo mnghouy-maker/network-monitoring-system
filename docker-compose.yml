@@ -1,6 +1,16 @@
-# Network Operations Platform — Phase 1 stack.
-# Brings up PostgreSQL and the FastAPI backend. Future phases will add
-# services (Zabbix, frontend, worker, etc.) to this same compose file.
+# Network Operations Platform stack.
+#
+# Core services (always on): PostgreSQL + FastAPI backend.
+# Optional monitoring stack (Zabbix server + web + its own DB) is behind the
+# "monitoring" compose profile so the core stack stays lightweight:
+#
+#   docker compose up --build                      # core only
+#   docker compose --profile monitoring up --build # core + Zabbix
+#
+# When Zabbix is up, point the backend at it by setting in .env:
+#   ZABBIX_URL=http://zabbix-web:8080
+#   ZABBIX_USER=Admin
+#   ZABBIX_PASSWORD=zabbix
 
 services:
   db:
@@ -42,8 +52,70 @@ services:
     networks:
       - netops
 
+  # --- Optional monitoring stack (profile: monitoring) -------------------
+  zabbix-db:
+    image: postgres:16-alpine
+    container_name: netops-zabbix-db
+    restart: unless-stopped
+    profiles: ["monitoring"]
+    environment:
+      POSTGRES_USER: ${ZABBIX_DB_USER:-zabbix}
+      POSTGRES_PASSWORD: ${ZABBIX_DB_PASSWORD:-zabbix}
+      POSTGRES_DB: ${ZABBIX_DB_NAME:-zabbix}
+    volumes:
+      - zabbix_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${ZABBIX_DB_USER:-zabbix}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - netops
+
+  zabbix-server:
+    image: zabbix/zabbix-server-pgsql:alpine-6.4-latest
+    container_name: netops-zabbix-server
+    restart: unless-stopped
+    profiles: ["monitoring"]
+    environment:
+      DB_SERVER_HOST: zabbix-db
+      POSTGRES_USER: ${ZABBIX_DB_USER:-zabbix}
+      POSTGRES_PASSWORD: ${ZABBIX_DB_PASSWORD:-zabbix}
+      POSTGRES_DB: ${ZABBIX_DB_NAME:-zabbix}
+    depends_on:
+      zabbix-db:
+        condition: service_healthy
+    ports:
+      - "${ZABBIX_SERVER_PORT:-10051}:10051"
+    networks:
+      - netops
+
+  zabbix-web:
+    image: zabbix/zabbix-web-nginx-pgsql:alpine-6.4-latest
+    container_name: netops-zabbix-web
+    restart: unless-stopped
+    profiles: ["monitoring"]
+    environment:
+      ZBX_SERVER_HOST: zabbix-server
+      DB_SERVER_HOST: zabbix-db
+      POSTGRES_USER: ${ZABBIX_DB_USER:-zabbix}
+      POSTGRES_PASSWORD: ${ZABBIX_DB_PASSWORD:-zabbix}
+      POSTGRES_DB: ${ZABBIX_DB_NAME:-zabbix}
+      PHP_TZ: ${TZ:-UTC}
+    depends_on:
+      zabbix-db:
+        condition: service_healthy
+      zabbix-server:
+        condition: service_started
+    ports:
+      - "${ZABBIX_WEB_PORT:-8080}:8080"
+    networks:
+      - netops
+
 volumes:
   postgres_data:
+    driver: local
+  zabbix_db_data:
     driver: local
 
 networks:

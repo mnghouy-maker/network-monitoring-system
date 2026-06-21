@@ -20,8 +20,11 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    # create_type=False: we create the type explicitly below, so create_table
+    # must not also emit a CREATE TYPE for the enum column (which would error
+    # with "type already exists").
     user_role = postgresql.ENUM(
-        "admin", "operator", "viewer", name="user_role", create_type=True
+        "admin", "operator", "viewer", name="user_role", create_type=False
     )
     user_role.create(op.get_bind(), checkfirst=True)
 

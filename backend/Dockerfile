@@ -10,9 +10,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# System deps: libpq for psycopg, curl for the healthcheck.
+# System deps: libpq for psycopg, curl for the healthcheck, iputils-ping for
+# ICMP reachability checks, libcap2-bin to grant ping raw-socket capability so
+# it works for the non-root runtime user.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential libpq-dev curl \
+    && apt-get install -y --no-install-recommends \
+        build-essential libpq-dev curl iputils-ping libcap2-bin \
+    && setcap cap_net_raw+ep "$(command -v ping)" \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies first to leverage Docker layer caching.
