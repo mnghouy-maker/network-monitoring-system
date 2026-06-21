@@ -1,0 +1,51 @@
+# Network Operations Platform — Phase 1 stack.
+# Brings up PostgreSQL and the FastAPI backend. Future phases will add
+# services (Zabbix, frontend, worker, etc.) to this same compose file.
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: netops-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-netops}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-netops}
+      POSTGRES_DB: ${POSTGRES_DB:-netops}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-netops} -d ${POSTGRES_DB:-netops}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - netops
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: netops-backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Override host so the app reaches Postgres via the compose network.
+      POSTGRES_SERVER: db
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    networks:
+      - netops
+
+volumes:
+  postgres_data:
+    driver: local
+
+networks:
+  netops:
+    driver: bridge
