@@ -21,6 +21,9 @@ from app.backup.protocols import ConfigBackend
 from app.core.config import settings
 from app.core.security import ACCESS_TOKEN_TYPE, decode_token
 from app.db.session import get_session
+from app.health.local import LocalHealthCollector
+from app.health.protocols import HealthCollector
+from app.health.ssh import SshHealthCollector
 from app.models.alert import AlertType
 from app.models.user import User, UserRole
 from app.monitoring.ping import SubprocessPingCollector
@@ -38,6 +41,7 @@ from app.repositories.backup import (
 )
 from app.repositories.device import DeviceRepository
 from app.repositories.metric import MetricRepository
+from app.repositories.server import ServerHealthRepository, ServerRepository
 from app.repositories.telegram import (
     TelegramChatRepository,
     TelegramUserRepository,
@@ -49,6 +53,11 @@ from app.services.backup import ConfigBackupService, ConnectionProfileService
 from app.services.device import DeviceService
 from app.services.monitoring import MonitoringService
 from app.services.notifier import AlertNotifier
+from app.services.server_health import (
+    HealthThresholds,
+    ServerHealthService,
+    ServerService,
+)
 from app.services.telegram_bot import (
     TelegramAdminService,
     TelegramCommandService,
@@ -113,6 +122,14 @@ def get_config_backup_repository(session: DbSession) -> ConfigBackupRepository:
     return ConfigBackupRepository(session)
 
 
+def get_server_repository(session: DbSession) -> ServerRepository:
+    return ServerRepository(session)
+
+
+def get_server_health_repository(session: DbSession) -> ServerHealthRepository:
+    return ServerHealthRepository(session)
+
+
 UserRepo = Annotated[UserRepository, Depends(get_user_repository)]
 DeviceRepo = Annotated[DeviceRepository, Depends(get_device_repository)]
 MetricRepo = Annotated[MetricRepository, Depends(get_metric_repository)]
@@ -136,6 +153,10 @@ ConnectionProfileRepo = Annotated[
 ]
 ConfigBackupRepo = Annotated[
     ConfigBackupRepository, Depends(get_config_backup_repository)
+]
+ServerRepo = Annotated[ServerRepository, Depends(get_server_repository)]
+ServerHealthRepo = Annotated[
+    ServerHealthRepository, Depends(get_server_health_repository)
 ]
 
 
@@ -193,6 +214,28 @@ def get_napalm_backend() -> ConfigBackend:
 @lru_cache
 def get_netmiko_backend() -> ConfigBackend:
     return NetmikoConfigBackend()
+
+
+# --- Server health collectors (stateless singletons) -------------------------
+@lru_cache
+def get_local_health_collector() -> HealthCollector:
+    return LocalHealthCollector()
+
+
+@lru_cache
+def get_ssh_health_collector() -> HealthCollector:
+    return SshHealthCollector()
+
+
+def _health_thresholds() -> HealthThresholds:
+    return HealthThresholds(
+        cpu_warn=settings.SERVER_CPU_WARN,
+        cpu_crit=settings.SERVER_CPU_CRIT,
+        memory_warn=settings.SERVER_MEMORY_WARN,
+        memory_crit=settings.SERVER_MEMORY_CRIT,
+        disk_warn=settings.SERVER_DISK_WARN,
+        disk_crit=settings.SERVER_DISK_CRIT,
+    )
 
 
 def _alert_default_thresholds() -> dict[AlertType, float]:
@@ -308,6 +351,23 @@ def get_config_backup_service(
     )
 
 
+def get_server_service(repo: ServerRepo) -> ServerService:
+    return ServerService(repo)
+
+
+def get_server_health_service(
+    server_repo: ServerRepo, health_repo: ServerHealthRepo
+) -> ServerHealthService:
+    return ServerHealthService(
+        server_repo=server_repo,
+        health_repo=health_repo,
+        local_collector=get_local_health_collector(),
+        ssh_collector=get_ssh_health_collector(),
+        thresholds=_health_thresholds(),
+        ssh_timeout=settings.HEALTH_SSH_TIMEOUT_SECONDS,
+    )
+
+
 UserSvc = Annotated[UserService, Depends(get_user_service)]
 AuthSvc = Annotated[AuthService, Depends(get_auth_service)]
 DeviceSvc = Annotated[DeviceService, Depends(get_device_service)]
@@ -327,6 +387,10 @@ ConnectionProfileSvc = Annotated[
 ]
 ConfigBackupSvc = Annotated[
     ConfigBackupService, Depends(get_config_backup_service)
+]
+ServerSvc = Annotated[ServerService, Depends(get_server_service)]
+ServerHealthSvc = Annotated[
+    ServerHealthService, Depends(get_server_health_service)
 ]
 
 

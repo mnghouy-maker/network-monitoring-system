@@ -11,6 +11,7 @@ from app.repositories.backup import (
 )
 from app.repositories.device import DeviceRepository
 from app.repositories.metric import MetricRepository
+from app.repositories.server import ServerHealthRepository, ServerRepository
 from app.repositories.telegram import (
     TelegramChatRepository,
     TelegramUserRepository,
@@ -28,4 +29,6 @@ __all__ = [
     "TelegramChatRepository",
     "ConnectionProfileRepository",
     "ConfigBackupRepository",
+    "ServerRepository",
+    "ServerHealthRepository",
 ]

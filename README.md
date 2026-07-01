@@ -3,14 +3,14 @@
 A self-hosted Network Operations Platform (NetOps). This repository is being
 built **one phase at a time**.
 
-> **Status: Phase 4 — Configuration Backup ✅**
-> Retrieve running/startup configs over SSH via **NAPALM** or **Netmiko**
-> (Paramiko), store **versioned** backups (deduplicated by content hash),
-> **diff** any two versions, and manage per-device SSH credentials **encrypted
-> at rest** (Fernet). Built on the Phase 1–3 foundation.
+> **Status: Phase 5 — Server Health Monitoring ✅**
+> Monitor server CPU / memory / disk / load / uptime via **local psutil** (the
+> host running the platform) or **SSH** (remote hosts), classify each snapshot
+> against warn/crit **thresholds** (healthy/warning/critical/unreachable), and
+> keep history. Built on the Phase 1–4 foundation.
 
-Planned capabilities (future phases): Server Health Monitoring, an AI
-Troubleshooting Assistant, and a React/Tailwind dashboard.
+Planned capabilities (future phases): an AI Troubleshooting Assistant and a
+React/Tailwind dashboard.
 
 ### Phase history
 
@@ -20,6 +20,7 @@ Troubleshooting Assistant, and a React/Tailwind dashboard.
 | 2 | Device inventory + network monitoring (SNMP & Zabbix) | ✅ |
 | 3 | Telegram alert system (routing, history, ack, recovery, bot commands) | ✅ |
 | 4 | Configuration backup (NAPALM/Netmiko, versioning, diff, encrypted creds) | ✅ |
+| 5 | Server health monitoring (local psutil / SSH, thresholds, history) | ✅ |
 
 ---
 
@@ -135,6 +136,18 @@ the unavailable gauges left `null`, rather than aborting the poll.
   with the error) for auditability.
 * **Diff** — unified diff between any two backups, or the latest two for a
   device.
+
+### Server health design (Phase 5)
+
+* **Two collectors** behind a `HealthCollector` protocol: `LocalHealthCollector`
+  (psutil, monitors the app host) and `SshHealthCollector` (runs a small shell
+  snippet over Paramiko and parses key=value lines). Both lazy-import and run
+  blocking work in a worker thread; SSH failures record an `unreachable`
+  snapshot rather than raising.
+* **Pure classification** — `classify_health` maps a sample to
+  healthy/warning/critical/unreachable against warn/crit thresholds; each poll
+  stores a `server_health_checks` snapshot with the computed status.
+* Server SSH passwords are encrypted at rest with the same Fernet helper.
 
 ---
 
@@ -351,6 +364,18 @@ Migration `0004` adds two tables and three enums (`connection_method`,
   `content_hash`, `size_bytes`, `error`, `created_at`. Indexed on `device_id`,
   `created_at`, and `(device_id, config_type)`.
 
+### Phase 5 tables
+
+Migration `0005` adds two tables and two enums (`server_monitor_method`,
+`server_health_status`):
+
+* **`servers`** — `name` (unique), `hostname`, `description`, `monitor_method`
+  (`local`/`ssh`), `ssh_port`, `ssh_username`, `ssh_password_encrypted`,
+  `is_active`.
+* **`server_health_checks`** — `server_id` (FK CASCADE), `collected_at`,
+  `reachable`, `status`, `cpu_percent`, `memory_percent`, `disk_percent`,
+  `load1/5/15`, `uptime_seconds`, `error`.
+
 ---
 
 ## 4. API Endpoints
@@ -417,6 +442,17 @@ inventory writes are operational actions restricted to Admin/Operator.
 | GET    | `/api/v1/backups/{id}` | any user | Backup metadata |
 | GET    | `/api/v1/backups/{id}/content` | Admin/Operator | Full config text |
 | GET    | `/api/v1/backups/{id}/diff/{other_id}` | Admin/Operator | Diff two backups |
+
+### Phase 5 — server health
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET/POST | `/api/v1/servers` | read: any / write: Admin/Operator | List / add servers |
+| GET/PATCH/DELETE | `/api/v1/servers/{id}` | read: any / write: Admin/Operator | Server CRUD (SSH secret hidden) |
+| POST   | `/api/v1/servers/{id}/health/poll` | Admin/Operator | Poll a server's health now |
+| POST   | `/api/v1/servers/health/poll-all` | Admin/Operator | Poll all active servers |
+| GET    | `/api/v1/servers/{id}/health/latest` | any user | Latest health snapshot |
+| GET    | `/api/v1/servers/{id}/health/history` | any user | Health history |
 
 Interactive docs are served at **`/docs`** (Swagger UI) and **`/redoc`**.
 
@@ -545,9 +581,13 @@ The unit tests cover:
   upsert (encryption, secrets hidden), backup success/dedup/change/failure,
   diff and diff-latest, and the backups API + RBAC (content restricted).
 
-Repositories, collectors, the Telegram sender and the SSH backend are swapped
-for in-memory/preset fakes, so the whole **127-test** suite runs without
-Postgres, an SNMP agent, a Zabbix server, the Telegram network, or SSH access.
+* **Server health (Phase 5):** SSH output parsing, health classification
+  (healthy/warning/critical/unreachable), poll-and-store, and the servers API +
+  RBAC (SSH secret hidden).
+
+Repositories, collectors, the Telegram sender and the SSH/health backends are
+swapped for in-memory/preset fakes, so the whole **141-test** suite runs without
+Postgres, SNMP, Zabbix, Telegram, SSH, or psutil.
 
 ---
 
@@ -641,7 +681,7 @@ Postgres, an SNMP agent, a Zabbix server, the Telegram network, or SSH access.
 
 ## 8. Next Steps
 
-Phases 1–4 are complete; Phases 5–7 (Server Health Monitoring, AI Troubleshooting
-Assistant, React/Tailwind dashboard) follow. Deferred follow-ups (until
-requested): a scheduler to run polling/evaluation/backups automatically, per-rule
-flap dampening, disk metric collection, and config restore.
+Phases 1–5 are complete; Phases 6–7 (AI Troubleshooting Assistant, React/Tailwind
+dashboard) follow. Deferred follow-ups (until requested): a scheduler to run
+polling/evaluation/backups/health-checks automatically, wiring server-health
+transitions into the alerting engine, per-rule flap dampening, and config restore.

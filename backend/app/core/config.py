@@ -107,6 +107,16 @@ class Settings(BaseSettings):
     # Per-operation timeout (seconds) for an SSH config fetch.
     BACKUP_SSH_TIMEOUT_SECONDS: float = 30.0
 
+    # --- Server health monitoring (Phase 5) -------------------------------
+    HEALTH_SSH_TIMEOUT_SECONDS: float = 15.0
+    # warn/crit percentage thresholds used to classify a health snapshot.
+    SERVER_CPU_WARN: float = 80.0
+    SERVER_CPU_CRIT: float = 95.0
+    SERVER_MEMORY_WARN: float = 80.0
+    SERVER_MEMORY_CRIT: float = 95.0
+    SERVER_DISK_WARN: float = 80.0
+    SERVER_DISK_CRIT: float = 95.0
+
     # --- Database ---------------------------------------------------------
     POSTGRES_SERVER: str = "db"
     POSTGRES_PORT: int = 5432

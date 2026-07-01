@@ -21,6 +21,12 @@ from app.models.backup import (
 )
 from app.models.device import Device, DeviceCategory, SNMPVersion
 from app.models.metric import DeviceMetric, InterfaceStat, MetricSource
+from app.models.server import (
+    Server,
+    ServerHealthCheck,
+    ServerHealthStatus,
+    ServerMonitorMethod,
+)
 from app.models.telegram import ChatType, TelegramChat, TelegramUser
 from app.models.user import User, UserRole
 
@@ -47,4 +53,8 @@ __all__ = [
     "ConnectionMethod",
     "ConfigType",
     "BackupStatus",
+    "Server",
+    "ServerHealthCheck",
+    "ServerMonitorMethod",
+    "ServerHealthStatus",
 ]

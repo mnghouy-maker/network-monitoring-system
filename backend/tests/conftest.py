@@ -17,6 +17,7 @@ import pytest
 # Provide a SECRET_KEY before app modules import settings.
 os.environ.setdefault("SECRET_KEY", "test-secret-key-not-for-production")
 
+from app.health.protocols import HealthSample  # noqa: E402
 from app.models.alert import (  # noqa: E402
     AlertAcknowledgement,
     AlertHistory,
@@ -33,6 +34,7 @@ from app.models.backup import (  # noqa: E402
 )
 from app.models.device import Device, DeviceCategory  # noqa: E402
 from app.models.metric import DeviceMetric  # noqa: E402
+from app.models.server import Server, ServerHealthCheck  # noqa: E402
 from app.models.telegram import TelegramChat, TelegramUser  # noqa: E402
 from app.models.user import User  # noqa: E402
 from app.monitoring.types import MetricSample, PingResult  # noqa: E402
@@ -559,3 +561,91 @@ def fake_backup_repo() -> FakeConfigBackupRepository:
 @pytest.fixture
 def fake_backend() -> FakeConfigBackend:
     return FakeConfigBackend()
+
+
+# --- Phase 5 fakes: server health --------------------------------------------
+class FakeServerRepository:
+    def __init__(self) -> None:
+        self._by_id: dict[uuid.UUID, Server] = {}
+
+    async def get(self, server_id: uuid.UUID) -> Server | None:
+        return self._by_id.get(server_id)
+
+    async def get_by_name(self, name: str) -> Server | None:
+        return next(
+            (s for s in self._by_id.values() if s.name == name), None
+        )
+
+    async def list(self, *, skip: int = 0, limit: int = 100) -> list[Server]:
+        return list(self._by_id.values())[skip : skip + limit]
+
+    async def list_active(self) -> list[Server]:
+        return [s for s in self._by_id.values() if s.is_active]
+
+    async def add(self, server: Server) -> Server:
+        if server.id is None:
+            server.id = uuid.uuid4()
+        if server.is_active is None:
+            server.is_active = True
+        _apply_timestamps(server)
+        self._by_id[server.id] = server
+        return server
+
+    async def update(self, server: Server) -> Server:
+        self._by_id[server.id] = server
+        return server
+
+    async def delete(self, server: Server) -> None:
+        self._by_id.pop(server.id, None)
+
+
+class FakeServerHealthRepository:
+    def __init__(self) -> None:
+        self._items: list[ServerHealthCheck] = []
+
+    async def add(self, check: ServerHealthCheck) -> ServerHealthCheck:
+        if check.id is None:
+            check.id = uuid.uuid4()
+        if check.collected_at is None:
+            check.collected_at = datetime.now(UTC)
+        self._items.append(check)
+        return check
+
+    async def get_latest(
+        self, server_id: uuid.UUID
+    ) -> ServerHealthCheck | None:
+        matches = [c for c in self._items if c.server_id == server_id]
+        return matches[-1] if matches else None
+
+    async def list_for_server(
+        self, server_id: uuid.UUID, *, skip: int = 0, limit: int = 100
+    ) -> list[ServerHealthCheck]:
+        matches = [c for c in self._items if c.server_id == server_id]
+        return list(reversed(matches))[skip : skip + limit]
+
+
+class FakeHealthCollector:
+    """Returns a preset :class:`HealthSample`, or raises a preset error."""
+
+    def __init__(
+        self, sample: HealthSample | None = None, error: Exception | None = None
+    ) -> None:
+        self._sample = sample or HealthSample(reachable=True)
+        self._error = error
+        self.calls: list = []
+
+    async def collect(self, target) -> HealthSample:  # noqa: ANN001
+        self.calls.append(target)
+        if self._error is not None:
+            raise self._error
+        return self._sample
+
+
+@pytest.fixture
+def fake_server_repo() -> FakeServerRepository:
+    return FakeServerRepository()
+
+
+@pytest.fixture
+def fake_server_health_repo() -> FakeServerHealthRepository:
+    return FakeServerHealthRepository()

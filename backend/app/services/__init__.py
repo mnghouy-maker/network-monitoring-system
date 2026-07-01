@@ -6,6 +6,7 @@ from app.services.backup import ConfigBackupService, ConnectionProfileService
 from app.services.device import DeviceService
 from app.services.monitoring import MonitoringService
 from app.services.notifier import AlertNotifier
+from app.services.server_health import ServerHealthService, ServerService
 from app.services.telegram_bot import (
     TelegramAdminService,
     TelegramCommandService,
@@ -25,4 +26,6 @@ __all__ = [
     "TelegramAdminService",
     "ConnectionProfileService",
     "ConfigBackupService",
+    "ServerService",
+    "ServerHealthService",
 ]
