@@ -112,6 +112,30 @@ services:
     networks:
       - netops
 
+  # --- Optional Telegram long-polling worker (profile: telegram) ---------
+  # Only needed when NOT using the webhook. Reuses the backend image and the
+  # same code path; requires TELEGRAM_BOT_TOKEN to be set in .env.
+  telegram-poller:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: netops-telegram-poller
+    restart: unless-stopped
+    profiles: ["telegram"]
+    env_file:
+      - .env
+    environment:
+      POSTGRES_SERVER: db
+    depends_on:
+      db:
+        condition: service_healthy
+      backend:
+        condition: service_healthy  # ensures migrations have been applied
+    # Override the API entrypoint: run the poller instead of uvicorn.
+    entrypoint: ["python", "-m", "app.telegram.poller"]
+    networks:
+      - netops
+
 volumes:
   postgres_data:
     driver: local

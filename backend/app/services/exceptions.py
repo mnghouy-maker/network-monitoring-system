@@ -28,3 +28,7 @@ class InactiveUserError(ServiceError):
 
 class MonitoringError(ServiceError):
     """Raised when a monitoring poll cannot be performed as requested."""
+
+
+class AlertError(ServiceError):
+    """Raised when an alert operation (e.g. acknowledgement) is invalid."""

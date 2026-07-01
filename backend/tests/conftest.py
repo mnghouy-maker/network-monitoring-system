@@ -17,8 +17,17 @@ import pytest
 # Provide a SECRET_KEY before app modules import settings.
 os.environ.setdefault("SECRET_KEY", "test-secret-key-not-for-production")
 
+from app.models.alert import (  # noqa: E402
+    AlertAcknowledgement,
+    AlertHistory,
+    AlertRule,
+    AlertSeverity,
+    AlertStatus,
+    AlertType,
+)
 from app.models.device import Device, DeviceCategory  # noqa: E402
 from app.models.metric import DeviceMetric  # noqa: E402
+from app.models.telegram import TelegramChat, TelegramUser  # noqa: E402
 from app.models.user import User  # noqa: E402
 from app.monitoring.types import MetricSample, PingResult  # noqa: E402
 
@@ -196,3 +205,244 @@ def fake_device_repo() -> FakeDeviceRepository:
 @pytest.fixture
 def fake_metric_repo() -> FakeMetricRepository:
     return FakeMetricRepository()
+
+
+# --- Phase 3 fakes: alerting + telegram --------------------------------------
+class FakeAlertRuleRepository:
+    def __init__(self) -> None:
+        self._by_id: dict[uuid.UUID, AlertRule] = {}
+
+    async def get(self, rule_id: uuid.UUID) -> AlertRule | None:
+        return self._by_id.get(rule_id)
+
+    async def list(self, *, skip: int = 0, limit: int = 100) -> list[AlertRule]:
+        return list(self._by_id.values())[skip : skip + limit]
+
+    async def list_enabled_for_device(
+        self, device_id: uuid.UUID
+    ) -> list[AlertRule]:
+        return [
+            r
+            for r in self._by_id.values()
+            if r.is_enabled and r.device_id in (None, device_id)
+        ]
+
+    async def add(self, rule: AlertRule) -> AlertRule:
+        if rule.id is None:
+            rule.id = uuid.uuid4()
+        # Mirror DB column defaults the ORM would apply at flush.
+        if rule.is_enabled is None:
+            rule.is_enabled = True
+        if rule.severity is None:
+            rule.severity = AlertSeverity.WARNING
+        _apply_timestamps(rule)
+        self._by_id[rule.id] = rule
+        return rule
+
+    async def update(self, rule: AlertRule) -> AlertRule:
+        self._by_id[rule.id] = rule
+        return rule
+
+    async def delete(self, rule: AlertRule) -> None:
+        self._by_id.pop(rule.id, None)
+
+
+class FakeAlertHistoryRepository:
+    def __init__(self) -> None:
+        self._items: list[AlertHistory] = []
+
+    async def get(self, alert_id: uuid.UUID) -> AlertHistory | None:
+        return next((a for a in self._items if a.id == alert_id), None)
+
+    async def get_active(
+        self, device_id: uuid.UUID, alert_type: AlertType
+    ) -> AlertHistory | None:
+        active = [
+            a
+            for a in self._items
+            if a.device_id == device_id
+            and a.alert_type == alert_type
+            and a.status in (AlertStatus.FIRING, AlertStatus.ACKNOWLEDGED)
+        ]
+        return active[-1] if active else None
+
+    async def list_active(
+        self, *, severity: AlertSeverity | None = None, limit: int = 100
+    ) -> list[AlertHistory]:
+        items = [
+            a
+            for a in self._items
+            if a.status in (AlertStatus.FIRING, AlertStatus.ACKNOWLEDGED)
+        ]
+        if severity is not None:
+            items = [a for a in items if a.severity == severity]
+        return list(reversed(items))[:limit]
+
+    async def list_history(
+        self,
+        *,
+        device_id: uuid.UUID | None = None,
+        skip: int = 0,
+        limit: int = 100,
+    ) -> list[AlertHistory]:
+        items = self._items
+        if device_id is not None:
+            items = [a for a in items if a.device_id == device_id]
+        return list(reversed(items))[skip : skip + limit]
+
+    async def add(self, alert: AlertHistory) -> AlertHistory:
+        if alert.id is None:
+            alert.id = uuid.uuid4()
+        if alert.triggered_at is None:
+            alert.triggered_at = datetime.now(UTC)
+        if alert.created_at is None:
+            alert.created_at = datetime.now(UTC)
+        self._items.append(alert)
+        return alert
+
+    async def update(self, alert: AlertHistory) -> AlertHistory:
+        return alert
+
+
+class FakeAlertAckRepository:
+    def __init__(self) -> None:
+        self.items: list[AlertAcknowledgement] = []
+
+    async def add(
+        self, ack: AlertAcknowledgement
+    ) -> AlertAcknowledgement:
+        if ack.id is None:
+            ack.id = uuid.uuid4()
+        ack.acknowledged_at = datetime.now(UTC)
+        self.items.append(ack)
+        return ack
+
+
+class FakeTelegramUserRepository:
+    def __init__(self) -> None:
+        self._by_id: dict[uuid.UUID, TelegramUser] = {}
+
+    async def get(self, pk: uuid.UUID) -> TelegramUser | None:
+        return self._by_id.get(pk)
+
+    async def get_by_telegram_id(self, tid: int) -> TelegramUser | None:
+        return next(
+            (u for u in self._by_id.values() if u.telegram_user_id == tid),
+            None,
+        )
+
+    async def list(self, *, skip: int = 0, limit: int = 100) -> list[TelegramUser]:
+        return list(self._by_id.values())[skip : skip + limit]
+
+    async def add(self, user: TelegramUser) -> TelegramUser:
+        if user.id is None:
+            user.id = uuid.uuid4()
+        if user.is_active is None:
+            user.is_active = False
+        _apply_timestamps(user)
+        self._by_id[user.id] = user
+        return user
+
+    async def update(self, user: TelegramUser) -> TelegramUser:
+        self._by_id[user.id] = user
+        return user
+
+
+class FakeTelegramChatRepository:
+    def __init__(self) -> None:
+        self._by_id: dict[uuid.UUID, TelegramChat] = {}
+
+    async def get(self, pk: uuid.UUID) -> TelegramChat | None:
+        return self._by_id.get(pk)
+
+    async def get_by_chat_id(self, chat_id: int) -> TelegramChat | None:
+        return next(
+            (c for c in self._by_id.values() if c.chat_id == chat_id), None
+        )
+
+    async def list(self, *, skip: int = 0, limit: int = 100) -> list[TelegramChat]:
+        return list(self._by_id.values())[skip : skip + limit]
+
+    async def list_active(self) -> list[TelegramChat]:
+        return [c for c in self._by_id.values() if c.is_active]
+
+    async def add(self, chat: TelegramChat) -> TelegramChat:
+        if chat.id is None:
+            chat.id = uuid.uuid4()
+        if chat.is_active is None:
+            chat.is_active = True
+        _apply_timestamps(chat)
+        self._by_id[chat.id] = chat
+        return chat
+
+    async def update(self, chat: TelegramChat) -> TelegramChat:
+        self._by_id[chat.id] = chat
+        return chat
+
+    async def delete(self, chat: TelegramChat) -> None:
+        self._by_id.pop(chat.id, None)
+
+
+class FakeTelegramSender:
+    """Records outbound messages/callbacks instead of calling Telegram."""
+
+    def __init__(self, configured: bool = True) -> None:
+        self._configured = configured
+        self.messages: list[tuple[int, str, dict | None]] = []
+        self.callbacks: list[tuple[str, str | None]] = []
+
+    @property
+    def is_configured(self) -> bool:
+        return self._configured
+
+    async def send_message(
+        self,
+        chat_id: int,
+        text: str,
+        *,
+        reply_markup: dict | None = None,
+        parse_mode: str | None = "HTML",
+    ) -> bool:
+        self.messages.append((chat_id, text, reply_markup))
+        return self._configured
+
+    async def answer_callback_query(
+        self, callback_query_id: str, text: str | None = None
+    ) -> bool:
+        self.callbacks.append((callback_query_id, text))
+        return True
+
+    async def get_updates(
+        self, offset: int | None = None, timeout: int = 0
+    ) -> list[dict]:
+        return []
+
+
+@pytest.fixture
+def fake_rule_repo() -> FakeAlertRuleRepository:
+    return FakeAlertRuleRepository()
+
+
+@pytest.fixture
+def fake_history_repo() -> FakeAlertHistoryRepository:
+    return FakeAlertHistoryRepository()
+
+
+@pytest.fixture
+def fake_ack_repo() -> FakeAlertAckRepository:
+    return FakeAlertAckRepository()
+
+
+@pytest.fixture
+def fake_tg_user_repo() -> FakeTelegramUserRepository:
+    return FakeTelegramUserRepository()
+
+
+@pytest.fixture
+def fake_tg_chat_repo() -> FakeTelegramChatRepository:
+    return FakeTelegramChatRepository()
+
+
+@pytest.fixture
+def fake_sender() -> FakeTelegramSender:
+    return FakeTelegramSender()

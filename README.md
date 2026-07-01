@@ -3,13 +3,15 @@
 A self-hosted Network Operations Platform (NetOps). This repository is being
 built **one phase at a time**.
 
-> **Status: Phase 2 — Device Inventory & Network Monitoring ✅**
-> Device inventory (add/edit/delete/categorize, vendor & location), plus
-> monitoring of ping status, CPU, memory, uptime and interface statistics via
-> **SNMP** and **Zabbix**. Built on the Phase 1 foundation (FastAPI,
-> PostgreSQL, SQLAlchemy, Alembic, JWT/RBAC).
+> **Status: Phase 3 — Telegram Alert System ✅**
+> Threshold/condition alerting engine (device offline/online, high CPU/memory/
+> disk/interface-utilization, packet loss) with alert **history**,
+> **acknowledgement**, **recovery** notifications, and severity-based **routing**
+> to Telegram chats. A Telegram bot serves `/help /status /devices /device
+> /alerts /critical`, with rate limiting, retries and logging. Built on the
+> Phase 1–2 foundation.
 
-Planned capabilities (future phases): Telegram Alert Bot, Configuration Backup
+Planned capabilities (future phases): Configuration Backup
 (Netmiko/Paramiko/NAPALM), Server Health Monitoring, an AI Troubleshooting
 Assistant, and a React/Tailwind dashboard.
 
@@ -19,6 +21,7 @@ Assistant, and a React/Tailwind dashboard.
 |-------|-------|--------|
 | 1 | Project foundation: FastAPI, PostgreSQL, SQLAlchemy, Alembic, JWT/RBAC | ✅ |
 | 2 | Device inventory + network monitoring (SNMP & Zabbix) | ✅ |
+| 3 | Telegram alert system (routing, history, ack, recovery, bot commands) | ✅ |
 
 ---
 
@@ -83,6 +86,42 @@ importing the app or running the tests never requires them. A collector failure
 degrades gracefully: the snapshot is still written with `reachable` recorded and
 the unavailable gauges left `null`, rather than aborting the poll.
 
+### Alerting & Telegram design (Phase 3)
+
+```
+   metrics (Phase 2)                         inbound updates (Telegram)
+        │                                     webhook  ┐        ┌ long-poll
+        ▼                                              ▼        ▼
+ ┌──────────────┐    fire/resolve   ┌─────────────────────────────────┐
+ │AlertEvaluator│──►│ AlertingService│──►│ AlertNotifier │─► Telegram   │
+ │ (pure logic) │   │ dedup+lifecycle│   │ (severity route)│  chats     │
+ └──────────────┘   └───────┬────────┘   └────────────────┘            │
+                            │  persist                TelegramUpdateDispatcher
+                    alert_history / acks     ┌────────┴─────────┐
+                                             │ CommandService   │ /help /status …
+                                             │ (ack via button) │
+                                             └──────────────────┘
+   Telegram client: rate limiting + retries + logging (app/telegram/client.py)
+```
+
+* **Evaluation** — `AlertEvaluator` is pure logic: given a device, its latest
+  metric (and the previous one for interface-utilization rate), it decides if a
+  rule's condition is met. `AlertingService` persists transitions, **dedupes**
+  (one open alert per device+type), emits **recovery** on clear, and handles
+  **acknowledgement**.
+* **Routing** — severity-based: an alert goes to every active chat whose
+  `min_severity` is at or below the alert's severity.
+* **Bot** — one `TelegramUpdateDispatcher` handles both webhook and long-poll
+  updates: it runs commands and processes inline **Acknowledge** buttons.
+  Unknown Telegram users are auto-registered *inactive* (an allowlist on top of
+  the bot token); an admin enables them via the API.
+* **Reliability** — the `TelegramClient` paces sends (global + per-chat rate
+  limits), retries on `429`/`5xx`/network errors with backoff (honouring
+  `retry_after`), and logs. The token comes from `TELEGRAM_BOT_TOKEN`; when
+  unset, delivery is a no-op and the rest of the platform is unaffected.
+* **Triggering** — evaluation is exposed as `POST /alerts/evaluate[/{id}]`
+  (Phase 2's polling is left untouched); a scheduler can call it periodically.
+
 ---
 
 ## 2. Folder Structure
@@ -117,42 +156,45 @@ network-monitoring-system/
     │   │   ├── base.py         # DeclarativeBase + TimestampMixin
     │   │   └── session.py      # async engine + unit-of-work session
     │   ├── models/
-    │   │   ├── user.py         # User + UserRole
-    │   │   ├── device.py       # Device + DeviceCategory/SNMPVersion  (Phase 2)
-    │   │   └── metric.py       # DeviceMetric + InterfaceStat          (Phase 2)
+    │   │   ├── user.py · device.py · metric.py
+    │   │   ├── alert.py        # AlertRule/History/Ack + enums         (Phase 3)
+    │   │   └── telegram.py     # TelegramUser / TelegramChat           (Phase 3)
     │   ├── schemas/
-    │   │   ├── user.py · token.py
-    │   │   ├── device.py        # device contracts                    (Phase 2)
-    │   │   └── metric.py        # metric/interface contracts          (Phase 2)
+    │   │   ├── user.py · token.py · device.py · metric.py
+    │   │   ├── alert.py         # rule/history/ack contracts           (Phase 3)
+    │   │   └── telegram.py      # user/chat contracts                  (Phase 3)
     │   ├── repositories/
-    │   │   ├── user.py
-    │   │   ├── device.py                                              # (Phase 2)
-    │   │   └── metric.py                                              # (Phase 2)
+    │   │   ├── user.py · device.py · metric.py
+    │   │   ├── alert.py         # rule/history/ack repos               (Phase 3)
+    │   │   └── telegram.py      # user/chat repos                      (Phase 3)
     │   ├── services/
-    │   │   ├── auth.py · user.py · exceptions.py
-    │   │   ├── device.py        # inventory business rules            (Phase 2)
-    │   │   └── monitoring.py    # poll orchestration + persistence    (Phase 2)
+    │   │   ├── auth.py · user.py · device.py · monitoring.py · exceptions.py
+    │   │   ├── alerting.py      # AlertEvaluator + AlertingService     (Phase 3)
+    │   │   ├── notifier.py      # severity-based alert routing         (Phase 3)
+    │   │   └── telegram_bot.py  # commands + dispatcher + admin        (Phase 3)
     │   ├── monitoring/          # collector infrastructure            (Phase 2)
-    │   │   ├── protocols.py     # PingCollector / MetricCollector
-    │   │   ├── types.py         # PingResult / MetricSample / Interface
-    │   │   ├── ping.py          # subprocess ICMP collector
-    │   │   ├── snmp.py          # SNMP collector (lazy puresnmp)
-    │   │   └── zabbix.py        # Zabbix API collector (lazy httpx)
+    │   │   ├── protocols.py · types.py · ping.py · snmp.py · zabbix.py
+    │   ├── telegram/            # Telegram infrastructure              (Phase 3)
+    │   │   ├── protocols.py     # TelegramSender protocol
+    │   │   ├── client.py        # Bot API client (rate limit + retry)
+    │   │   ├── rate_limit.py    # global + per-chat limiter
+    │   │   ├── formatting.py    # HTML alert/recovery formatting
+    │   │   └── poller.py        # long-polling worker (python -m ...)
     │   └── api/
     │       └── v1/
     │           ├── router.py
     │           └── endpoints/
     │               ├── auth.py · users.py · health.py
-    │               ├── devices.py     # inventory CRUD                (Phase 2)
-    │               └── monitoring.py  # poll / latest / history       (Phase 2)
+    │               ├── devices.py · monitoring.py                     (Phase 2)
+    │               ├── alerts.py      # rules/history/ack/evaluate    (Phase 3)
+    │               └── telegram.py    # webhook + users/chats admin   (Phase 3)
     └── tests/
-        ├── conftest.py            # in-memory repo + collector fakes
-        ├── test_security.py
-        ├── test_user_service.py
-        ├── test_auth_service.py
-        ├── test_device_service.py        # (Phase 2)
-        ├── test_monitoring_service.py     # (Phase 2)
-        └── test_ping_collector.py         # (Phase 2)
+        ├── conftest.py            # in-memory repo/collector/sender fakes
+        ├── test_*.py              # Phases 1–2 (security, services, api, …)
+        ├── test_alert_evaluator.py · test_alerting_service.py         # (Phase 3)
+        ├── test_telegram_command.py · test_telegram_dispatcher.py     # (Phase 3)
+        ├── test_telegram_client.py · test_rate_limiter.py            # (Phase 3)
+        ├── test_telegram_formatting.py · test_alerts_api.py           # (Phase 3)
 ```
 
 ---
@@ -247,6 +289,36 @@ startup is an Admin **and** a superuser.
 | `in_octets` / `out_octets` | `BIGINT` | HC counters |
 | `in_errors` / `out_errors` | `BIGINT` | error counters |
 
+### Phase 3 tables
+
+Migration `0003` adds five tables and four enums
+(`alert_type`, `alert_severity`, `alert_status`, `chat_type`):
+
+```
+ alert_rules ──1:N──► alert_history ──1:N──► alert_acknowledgements
+ (thresholds)         (fired alerts)         (who acked)     ▲
+ device_id?─►devices  device_id─►devices     telegram_user_id┘─► telegram_users
+                                                             telegram_chats (routing)
+```
+
+* **`alert_rules`** — `name`, `alert_type`, `severity` (default `warning`),
+  `threshold` (nullable → falls back to a config default), `device_id`
+  (nullable = all devices, FK CASCADE), `is_enabled`.
+* **`alert_history`** — `device_id` (FK CASCADE), `rule_id` (FK SET NULL),
+  `alert_type`, `severity`, `status` (`firing`/`acknowledged`/`resolved`),
+  `message`, `value`, `threshold`, `triggered_at`, `resolved_at`. Indexed on
+  `(device_id, alert_type)`, `status`, `triggered_at`.
+* **`alert_acknowledgements`** — `alert_id` (FK CASCADE), `telegram_user_id`
+  (FK SET NULL), `note`, `acknowledged_at`.
+* **`telegram_users`** — `telegram_user_id` (BIGINT, unique), `username`,
+  `is_active` (authorization allowlist, default `false`), optional
+  `platform_user_id`.
+* **`telegram_chats`** — `chat_id` (BIGINT, unique), `chat_type`, `is_active`,
+  `min_severity` (routing floor).
+
+`alert_severity` (`info·warning·critical`) is a single shared enum used by
+rules, history, and chats.
+
 ---
 
 ## 4. API Endpoints
@@ -282,6 +354,24 @@ startup is an Admin **and** a superuser.
 
 "any user" = any authenticated, active user (Viewer included). Polling and
 inventory writes are operational actions restricted to Admin/Operator.
+
+### Phase 3 — alerts & Telegram
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET    | `/api/v1/alerts` | any user | Active alerts (filter `?severity=`) |
+| GET    | `/api/v1/alerts/critical` | any user | Active critical alerts |
+| GET    | `/api/v1/alerts/history` | any user | Alert history (filter `?device_id=`) |
+| POST   | `/api/v1/alerts/{id}/ack` | Admin/Operator | Acknowledge an alert |
+| POST   | `/api/v1/alerts/evaluate` | Admin/Operator | Evaluate all active devices |
+| POST   | `/api/v1/alerts/evaluate/{device_id}` | Admin/Operator | Evaluate one device |
+| GET/POST | `/api/v1/alerts/rules` | read: any / write: Admin/Operator | List / create rules |
+| GET/PATCH/DELETE | `/api/v1/alerts/rules/{id}` | read: any / write: Admin/Operator | Rule CRUD |
+| POST   | `/api/v1/telegram/webhook/{secret}` | secret-gated | Inbound Telegram updates |
+| GET    | `/api/v1/telegram/users` | Admin | List Telegram users |
+| PATCH  | `/api/v1/telegram/users/{id}` | Admin | Authorize/deactivate a user |
+| GET/POST | `/api/v1/telegram/chats` | Admin | List / register alert chats |
+| PATCH/DELETE | `/api/v1/telegram/chats/{id}` | Admin | Manage alert chats |
 
 Interactive docs are served at **`/docs`** (Swagger UI) and **`/redoc`**.
 
@@ -326,6 +416,26 @@ Zabbix web is published on `http://localhost:8080` (default login `Admin` /
 `ZABBIX_URL=http://zabbix-web:8080`, `ZABBIX_USER=Admin`, `ZABBIX_PASSWORD=...`,
 then poll a device with `?source=zabbix`. Without these, monitoring works via
 direct **SNMP** (the default source) and ICMP ping out of the box.
+
+#### Optional: Telegram alerting
+
+1. Create a bot with **@BotFather** and put its token in `.env`
+   (`TELEGRAM_BOT_TOKEN=...`). With no token, alerting still runs but delivery
+   is a no-op.
+2. Choose how the bot receives commands:
+   * **Webhook** — set `TELEGRAM_WEBHOOK_SECRET` (e.g. `openssl rand -hex 16`)
+     and register it with Telegram:
+     `https://api.telegram.org/bot<token>/setWebhook?url=https://<host>/api/v1/telegram/webhook/<secret>`
+   * **Long-polling** — no public URL needed; run the worker:
+     `docker compose --profile telegram up -d telegram-poller`
+3. Message the bot `/start`; it replies with your Telegram ID. An admin enables
+   it: `PATCH /api/v1/telegram/users/{id}` with `{"is_active": true}`.
+4. Register a delivery chat: `POST /api/v1/telegram/chats`
+   `{"chat_id": <id>, "chat_type": "group", "min_severity": "warning"}`.
+5. Create rules (`POST /api/v1/alerts/rules`) and trigger evaluation
+   (`POST /api/v1/alerts/evaluate`, e.g. from cron after each poll). Firing
+   alerts are delivered with an **Acknowledge** button; recoveries notify when
+   the condition clears.
 
 ### Option B — Local development (without Docker)
 
@@ -377,9 +487,18 @@ The unit tests cover:
 * **Monitoring (Phase 2):** poll orchestration and persistence, SNMP-vs-Zabbix
   source selection, the "Zabbix requested but unconfigured" error, graceful
   degradation when a collector fails, and the ping output parser.
+* **Alerting (Phase 3):** evaluator logic for every alert type (offline, CPU,
+  memory, packet loss, two-snapshot interface utilization, inert disk, default
+  thresholds); service firing/**dedup**/**recovery**/**ack** and severity
+  routing; alerts REST API + RBAC.
+* **Telegram (Phase 3):** command replies and authorization, the update
+  dispatcher (auto-register, enable, callback ack), the client's retry/backoff
+  on `429`/`5xx`/network, the rate limiter (fake clock), HTML formatting, and
+  the secret-gated webhook.
 
-Collectors and repositories are swapped for in-memory/preset fakes, so the whole
-suite runs without Postgres, an SNMP agent, or a Zabbix server.
+Repositories, collectors and the Telegram sender are swapped for
+in-memory/preset fakes, so the whole **112-test** suite runs without Postgres,
+an SNMP agent, a Zabbix server, or the Telegram network.
 
 ---
 
@@ -434,11 +553,36 @@ suite runs without Postgres, an SNMP agent, or a Zabbix server.
 17. **Optional Zabbix via compose profile.** The Zabbix stack is opt-in
     (`--profile monitoring`); the platform is fully functional with SNMP alone.
 
+### Phase 3 additions
+
+18. **Pure evaluation core.** `AlertEvaluator` has no I/O, so every alert
+    type's threshold/condition logic is exhaustively unit-tested; `AlertingService`
+    handles persistence, dedup, recovery and routing around it.
+19. **Idempotent alert lifecycle.** One open alert per device+type (dedup),
+    automatic **recovery** on clear, and acknowledgement — so a persistent
+    condition notifies once, not on every evaluation.
+20. **One dispatcher, two transports.** Webhook and long-poller share a single
+    `TelegramUpdateDispatcher`, so command/ack behaviour is identical and tested
+    once. Long-polling is an opt-in compose profile.
+21. **Resilient delivery.** The client enforces global + per-chat **rate limits**
+    and **retries** on `429` (honouring `retry_after`), `5xx`, and network errors
+    with exponential backoff; clock/sleep/HTTP are injectable for deterministic
+    tests.
+22. **Allowlist on top of the token.** Unknown Telegram users auto-register as
+    *inactive*; an admin enables them, so a leaked bot link can't run commands or
+    acknowledge alerts.
+23. **Non-invasive integration.** Phase 3 reads Phase 2 metrics via the existing
+    repositories and exposes `evaluate` endpoints rather than modifying the
+    monitoring service — the poll path is untouched.
+24. **Honest metric coverage.** CPU/memory/packet-loss/offline map to single
+    snapshots; interface utilization is derived from two snapshots; disk is a
+    defined type left inert (no disk metric is collected yet) rather than faked.
+
 ---
 
 ## 8. Next Steps
 
-Phase 2 is complete. **Awaiting approval before starting Phase 3** (Telegram
-Alert Bot). Possible follow-ups within monitoring (deferred until requested):
-scheduled background polling, counter-delta → bandwidth/error-rate derivation,
-and alert thresholds.
+Phase 3 is complete. **Awaiting approval before starting Phase 4** (Configuration
+Backup with Netmiko/Paramiko/NAPALM). Deferred follow-ups (until requested):
+a scheduler to run polling + evaluation automatically, per-rule flap dampening
+(consecutive breaches), disk metric collection, and per-chat/per-rule routing.

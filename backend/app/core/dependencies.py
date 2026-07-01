@@ -18,18 +18,38 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.security import ACCESS_TOKEN_TYPE, decode_token
 from app.db.session import get_session
+from app.models.alert import AlertType
 from app.models.user import User, UserRole
 from app.monitoring.ping import SubprocessPingCollector
 from app.monitoring.protocols import MetricCollector, PingCollector
 from app.monitoring.snmp import SnmpMetricCollector
 from app.monitoring.zabbix import ZabbixMetricCollector
+from app.repositories.alert import (
+    AlertAcknowledgementRepository,
+    AlertHistoryRepository,
+    AlertRuleRepository,
+)
 from app.repositories.device import DeviceRepository
 from app.repositories.metric import MetricRepository
+from app.repositories.telegram import (
+    TelegramChatRepository,
+    TelegramUserRepository,
+)
 from app.repositories.user import UserRepository
+from app.services.alerting import AlertingService
 from app.services.auth import AuthService
 from app.services.device import DeviceService
 from app.services.monitoring import MonitoringService
+from app.services.notifier import AlertNotifier
+from app.services.telegram_bot import (
+    TelegramAdminService,
+    TelegramCommandService,
+    TelegramUpdateDispatcher,
+)
 from app.services.user import UserService
+from app.telegram.client import TelegramClient
+from app.telegram.protocols import TelegramSender
+from app.telegram.rate_limit import RateLimiter
 
 # tokenUrl is used by Swagger UI's "Authorize" button.
 oauth2_scheme = OAuth2PasswordBearer(
@@ -53,9 +73,46 @@ def get_metric_repository(session: DbSession) -> MetricRepository:
     return MetricRepository(session)
 
 
+def get_alert_rule_repository(session: DbSession) -> AlertRuleRepository:
+    return AlertRuleRepository(session)
+
+
+def get_alert_history_repository(session: DbSession) -> AlertHistoryRepository:
+    return AlertHistoryRepository(session)
+
+
+def get_alert_ack_repository(
+    session: DbSession,
+) -> AlertAcknowledgementRepository:
+    return AlertAcknowledgementRepository(session)
+
+
+def get_telegram_user_repository(session: DbSession) -> TelegramUserRepository:
+    return TelegramUserRepository(session)
+
+
+def get_telegram_chat_repository(session: DbSession) -> TelegramChatRepository:
+    return TelegramChatRepository(session)
+
+
 UserRepo = Annotated[UserRepository, Depends(get_user_repository)]
 DeviceRepo = Annotated[DeviceRepository, Depends(get_device_repository)]
 MetricRepo = Annotated[MetricRepository, Depends(get_metric_repository)]
+AlertRuleRepo = Annotated[
+    AlertRuleRepository, Depends(get_alert_rule_repository)
+]
+AlertHistoryRepo = Annotated[
+    AlertHistoryRepository, Depends(get_alert_history_repository)
+]
+AlertAckRepo = Annotated[
+    AlertAcknowledgementRepository, Depends(get_alert_ack_repository)
+]
+TelegramUserRepo = Annotated[
+    TelegramUserRepository, Depends(get_telegram_user_repository)
+]
+TelegramChatRepo = Annotated[
+    TelegramChatRepository, Depends(get_telegram_chat_repository)
+]
 
 
 # --- Collectors (process-wide singletons, configured from settings) ----------
@@ -86,6 +143,33 @@ def get_zabbix_collector() -> ZabbixMetricCollector:
     )
 
 
+# --- Telegram client (process-wide singleton; holds rate-limiter state) ------
+@lru_cache
+def get_telegram_client() -> TelegramClient:
+    rate_limiter = RateLimiter(
+        settings.TELEGRAM_RATE_LIMIT_PER_SECOND,
+        settings.TELEGRAM_PER_CHAT_INTERVAL_SECONDS,
+    )
+    return TelegramClient(
+        settings.TELEGRAM_BOT_TOKEN,
+        base_url=settings.TELEGRAM_API_BASE_URL,
+        rate_limiter=rate_limiter,
+        max_retries=settings.TELEGRAM_MAX_RETRIES,
+        backoff_seconds=settings.TELEGRAM_RETRY_BACKOFF_SECONDS,
+        timeout_seconds=settings.TELEGRAM_TIMEOUT_SECONDS,
+    )
+
+
+def _alert_default_thresholds() -> dict[AlertType, float]:
+    return {
+        AlertType.HIGH_CPU: settings.ALERT_CPU_THRESHOLD,
+        AlertType.HIGH_MEMORY: settings.ALERT_MEMORY_THRESHOLD,
+        AlertType.HIGH_DISK: settings.ALERT_DISK_THRESHOLD,
+        AlertType.HIGH_INTERFACE_UTIL: settings.ALERT_INTERFACE_UTIL_THRESHOLD,
+        AlertType.PACKET_LOSS: settings.ALERT_PACKET_LOSS_THRESHOLD,
+    }
+
+
 # --- Services -----------------------------------------------------------------
 def get_user_service(repo: UserRepo) -> UserService:
     return UserService(repo)
@@ -112,12 +196,76 @@ def get_monitoring_service(
     )
 
 
+def get_alert_notifier(
+    chat_repo: TelegramChatRepo,
+) -> AlertNotifier:
+    return AlertNotifier(get_telegram_client(), chat_repo)
+
+
+def get_alerting_service(
+    rule_repo: AlertRuleRepo,
+    history_repo: AlertHistoryRepo,
+    ack_repo: AlertAckRepo,
+    device_repo: DeviceRepo,
+    metric_repo: MetricRepo,
+    notifier: Annotated[AlertNotifier, Depends(get_alert_notifier)],
+) -> AlertingService:
+    return AlertingService(
+        rule_repo=rule_repo,
+        history_repo=history_repo,
+        ack_repo=ack_repo,
+        device_repo=device_repo,
+        metric_repo=metric_repo,
+        notifier=notifier,
+        default_thresholds=_alert_default_thresholds(),
+    )
+
+
+def get_telegram_command_service(
+    device_repo: DeviceRepo,
+    metric_repo: MetricRepo,
+    history_repo: AlertHistoryRepo,
+) -> TelegramCommandService:
+    return TelegramCommandService(device_repo, metric_repo, history_repo)
+
+
+def get_telegram_dispatcher(
+    command_service: Annotated[
+        TelegramCommandService, Depends(get_telegram_command_service)
+    ],
+    alerting_service: Annotated[
+        AlertingService, Depends(get_alerting_service)
+    ],
+    tg_user_repo: TelegramUserRepo,
+) -> TelegramUpdateDispatcher:
+    return TelegramUpdateDispatcher(
+        sender=get_telegram_client(),
+        command_service=command_service,
+        alerting_service=alerting_service,
+        telegram_user_repo=tg_user_repo,
+    )
+
+
+def get_telegram_admin_service(
+    user_repo: TelegramUserRepo, chat_repo: TelegramChatRepo
+) -> TelegramAdminService:
+    return TelegramAdminService(user_repo, chat_repo)
+
+
 UserSvc = Annotated[UserService, Depends(get_user_service)]
 AuthSvc = Annotated[AuthService, Depends(get_auth_service)]
 DeviceSvc = Annotated[DeviceService, Depends(get_device_service)]
 MonitoringSvc = Annotated[
     MonitoringService, Depends(get_monitoring_service)
 ]
+AlertingSvc = Annotated[AlertingService, Depends(get_alerting_service)]
+TelegramDispatcher = Annotated[
+    TelegramUpdateDispatcher, Depends(get_telegram_dispatcher)
+]
+TelegramAdminSvc = Annotated[
+    TelegramAdminService, Depends(get_telegram_admin_service)
+]
+TelegramClientDep = Annotated[TelegramSender, Depends(get_telegram_client)]
 
 
 # --- Current user / auth guards ----------------------------------------------

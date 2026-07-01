@@ -75,6 +75,28 @@ class Settings(BaseSettings):
     ZABBIX_VERIFY_TLS: bool = True
     ZABBIX_TIMEOUT_SECONDS: float = 10.0
 
+    # --- Telegram bot -----------------------------------------------------
+    # Leave TELEGRAM_BOT_TOKEN empty to disable Telegram delivery entirely.
+    TELEGRAM_BOT_TOKEN: str | None = None
+    TELEGRAM_API_BASE_URL: str = "https://api.telegram.org"
+    # Shared secret for the inbound webhook path/header. If empty the webhook
+    # endpoint is disabled (use long-polling instead).
+    TELEGRAM_WEBHOOK_SECRET: str | None = None
+    TELEGRAM_MAX_RETRIES: int = 3
+    TELEGRAM_RETRY_BACKOFF_SECONDS: float = 0.5
+    TELEGRAM_TIMEOUT_SECONDS: float = 10.0
+    # Rate limiting: Telegram allows ~30 msg/s globally and ~1 msg/s per chat.
+    TELEGRAM_RATE_LIMIT_PER_SECOND: float = 25.0
+    TELEGRAM_PER_CHAT_INTERVAL_SECONDS: float = 1.0
+    TELEGRAM_POLL_INTERVAL_SECONDS: float = 2.0
+
+    # --- Alerting thresholds (fallbacks when a rule has no threshold) ------
+    ALERT_CPU_THRESHOLD: float = 90.0
+    ALERT_MEMORY_THRESHOLD: float = 90.0
+    ALERT_DISK_THRESHOLD: float = 90.0
+    ALERT_INTERFACE_UTIL_THRESHOLD: float = 90.0
+    ALERT_PACKET_LOSS_THRESHOLD: float = 20.0
+
     # --- Database ---------------------------------------------------------
     POSTGRES_SERVER: str = "db"
     POSTGRES_PORT: int = 5432
