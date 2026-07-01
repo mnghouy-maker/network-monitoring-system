@@ -12,6 +12,13 @@ from app.models.alert import (
     AlertStatus,
     AlertType,
 )
+from app.models.backup import (
+    BackupStatus,
+    ConfigBackup,
+    ConfigType,
+    ConnectionMethod,
+    DeviceConnectionProfile,
+)
 from app.models.device import Device, DeviceCategory, SNMPVersion
 from app.models.metric import DeviceMetric, InterfaceStat, MetricSource
 from app.models.telegram import ChatType, TelegramChat, TelegramUser
@@ -35,4 +42,9 @@ __all__ = [
     "TelegramUser",
     "TelegramChat",
     "ChatType",
+    "DeviceConnectionProfile",
+    "ConfigBackup",
+    "ConnectionMethod",
+    "ConfigType",
+    "BackupStatus",
 ]

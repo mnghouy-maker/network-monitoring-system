@@ -97,6 +97,16 @@ class Settings(BaseSettings):
     ALERT_INTERFACE_UTIL_THRESHOLD: float = 90.0
     ALERT_PACKET_LOSS_THRESHOLD: float = 20.0
 
+    # --- Configuration backup (Phase 4) -----------------------------------
+    # Fernet key (44-char urlsafe base64) used to encrypt device SSH secrets
+    # at rest. If empty, a key is derived from SECRET_KEY (fine for dev, but
+    # rotating SECRET_KEY then makes stored secrets undecryptable — set a
+    # dedicated key in production: `python -c "from cryptography.fernet import
+    # Fernet; print(Fernet.generate_key().decode())"`).
+    BACKUP_ENCRYPTION_KEY: str | None = None
+    # Per-operation timeout (seconds) for an SSH config fetch.
+    BACKUP_SSH_TIMEOUT_SECONDS: float = 30.0
+
     # --- Database ---------------------------------------------------------
     POSTGRES_SERVER: str = "db"
     POSTGRES_PORT: int = 5432

@@ -25,6 +25,12 @@ from app.models.alert import (  # noqa: E402
     AlertStatus,
     AlertType,
 )
+from app.models.backup import (  # noqa: E402
+    BackupStatus,
+    ConfigBackup,
+    ConfigType,
+    DeviceConnectionProfile,
+)
 from app.models.device import Device, DeviceCategory  # noqa: E402
 from app.models.metric import DeviceMetric  # noqa: E402
 from app.models.telegram import TelegramChat, TelegramUser  # noqa: E402
@@ -446,3 +452,110 @@ def fake_tg_chat_repo() -> FakeTelegramChatRepository:
 @pytest.fixture
 def fake_sender() -> FakeTelegramSender:
     return FakeTelegramSender()
+
+
+# --- Phase 4 fakes: config backup --------------------------------------------
+class FakeConnectionProfileRepository:
+    def __init__(self) -> None:
+        self._by_device: dict[uuid.UUID, DeviceConnectionProfile] = {}
+
+    async def get_by_device(
+        self, device_id: uuid.UUID
+    ) -> DeviceConnectionProfile | None:
+        return self._by_device.get(device_id)
+
+    async def list_active(self) -> list[DeviceConnectionProfile]:
+        return [p for p in self._by_device.values() if p.is_active]
+
+    async def add(
+        self, profile: DeviceConnectionProfile
+    ) -> DeviceConnectionProfile:
+        if profile.id is None:
+            profile.id = uuid.uuid4()
+        if profile.is_active is None:
+            profile.is_active = True
+        _apply_timestamps(profile)
+        self._by_device[profile.device_id] = profile
+        return profile
+
+    async def update(
+        self, profile: DeviceConnectionProfile
+    ) -> DeviceConnectionProfile:
+        self._by_device[profile.device_id] = profile
+        return profile
+
+    async def delete(self, profile: DeviceConnectionProfile) -> None:
+        self._by_device.pop(profile.device_id, None)
+
+
+class FakeConfigBackupRepository:
+    def __init__(self) -> None:
+        self._items: list[ConfigBackup] = []
+
+    async def get(self, backup_id: uuid.UUID) -> ConfigBackup | None:
+        return next((b for b in self._items if b.id == backup_id), None)
+
+    async def get_latest_success(
+        self, device_id: uuid.UUID, config_type: ConfigType
+    ) -> ConfigBackup | None:
+        matches = [
+            b
+            for b in self._items
+            if b.device_id == device_id
+            and b.config_type == config_type
+            and b.status is BackupStatus.SUCCESS
+        ]
+        return matches[-1] if matches else None
+
+    async def list_for_device(
+        self,
+        device_id: uuid.UUID,
+        *,
+        config_type: ConfigType | None = None,
+        skip: int = 0,
+        limit: int = 100,
+    ) -> list[ConfigBackup]:
+        items = [b for b in self._items if b.device_id == device_id]
+        if config_type is not None:
+            items = [b for b in items if b.config_type == config_type]
+        return list(reversed(items))[skip : skip + limit]
+
+    async def add(self, backup: ConfigBackup) -> ConfigBackup:
+        if backup.id is None:
+            backup.id = uuid.uuid4()
+        if backup.created_at is None:
+            backup.created_at = datetime.now(UTC)
+        self._items.append(backup)
+        return backup
+
+
+class FakeConfigBackend:
+    """Returns preset config text, or raises a preset error."""
+
+    def __init__(
+        self, content: str = "hostname router\n!", error: Exception | None = None
+    ) -> None:
+        self.content = content
+        self._error = error
+        self.calls: list = []
+
+    async def fetch_config(self, params, config_type) -> str:  # noqa: ANN001
+        self.calls.append((params, config_type))
+        if self._error is not None:
+            raise self._error
+        return self.content
+
+
+@pytest.fixture
+def fake_profile_repo() -> FakeConnectionProfileRepository:
+    return FakeConnectionProfileRepository()
+
+
+@pytest.fixture
+def fake_backup_repo() -> FakeConfigBackupRepository:
+    return FakeConfigBackupRepository()
+
+
+@pytest.fixture
+def fake_backend() -> FakeConfigBackend:
+    return FakeConfigBackend()

@@ -5,6 +5,7 @@ from fastapi import APIRouter
 from app.api.v1.endpoints import (
     alerts,
     auth,
+    backups,
     devices,
     health,
     monitoring,
@@ -20,3 +21,4 @@ api_router.include_router(devices.router)
 api_router.include_router(monitoring.router)
 api_router.include_router(alerts.router)
 api_router.include_router(telegram.router)
+api_router.include_router(backups.router)

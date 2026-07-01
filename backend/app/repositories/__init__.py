@@ -5,6 +5,10 @@ from app.repositories.alert import (
     AlertHistoryRepository,
     AlertRuleRepository,
 )
+from app.repositories.backup import (
+    ConfigBackupRepository,
+    ConnectionProfileRepository,
+)
 from app.repositories.device import DeviceRepository
 from app.repositories.metric import MetricRepository
 from app.repositories.telegram import (
@@ -22,4 +26,6 @@ __all__ = [
     "AlertAcknowledgementRepository",
     "TelegramUserRepository",
     "TelegramChatRepository",
+    "ConnectionProfileRepository",
+    "ConfigBackupRepository",
 ]

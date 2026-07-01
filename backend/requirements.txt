@@ -22,3 +22,8 @@ bcrypt==4.2.1
 # --- Monitoring (SNMP polling + Zabbix API) ---
 puresnmp==2.0.0
 httpx==0.28.1
+
+# --- Configuration backup (SSH automation) ---
+netmiko==4.5.0
+paramiko==3.5.1
+napalm==5.0.0

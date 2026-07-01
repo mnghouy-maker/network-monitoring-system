@@ -32,3 +32,7 @@ class MonitoringError(ServiceError):
 
 class AlertError(ServiceError):
     """Raised when an alert operation (e.g. acknowledgement) is invalid."""
+
+
+class BackupError(ServiceError):
+    """Raised when a configuration backup cannot be performed as requested."""

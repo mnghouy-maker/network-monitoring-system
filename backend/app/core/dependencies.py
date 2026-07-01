@@ -15,6 +15,9 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.backup.napalm_backend import NapalmConfigBackend
+from app.backup.netmiko_backend import NetmikoConfigBackend
+from app.backup.protocols import ConfigBackend
 from app.core.config import settings
 from app.core.security import ACCESS_TOKEN_TYPE, decode_token
 from app.db.session import get_session
@@ -29,6 +32,10 @@ from app.repositories.alert import (
     AlertHistoryRepository,
     AlertRuleRepository,
 )
+from app.repositories.backup import (
+    ConfigBackupRepository,
+    ConnectionProfileRepository,
+)
 from app.repositories.device import DeviceRepository
 from app.repositories.metric import MetricRepository
 from app.repositories.telegram import (
@@ -38,6 +45,7 @@ from app.repositories.telegram import (
 from app.repositories.user import UserRepository
 from app.services.alerting import AlertingService
 from app.services.auth import AuthService
+from app.services.backup import ConfigBackupService, ConnectionProfileService
 from app.services.device import DeviceService
 from app.services.monitoring import MonitoringService
 from app.services.notifier import AlertNotifier
@@ -95,6 +103,16 @@ def get_telegram_chat_repository(session: DbSession) -> TelegramChatRepository:
     return TelegramChatRepository(session)
 
 
+def get_connection_profile_repository(
+    session: DbSession,
+) -> ConnectionProfileRepository:
+    return ConnectionProfileRepository(session)
+
+
+def get_config_backup_repository(session: DbSession) -> ConfigBackupRepository:
+    return ConfigBackupRepository(session)
+
+
 UserRepo = Annotated[UserRepository, Depends(get_user_repository)]
 DeviceRepo = Annotated[DeviceRepository, Depends(get_device_repository)]
 MetricRepo = Annotated[MetricRepository, Depends(get_metric_repository)]
@@ -112,6 +130,12 @@ TelegramUserRepo = Annotated[
 ]
 TelegramChatRepo = Annotated[
     TelegramChatRepository, Depends(get_telegram_chat_repository)
+]
+ConnectionProfileRepo = Annotated[
+    ConnectionProfileRepository, Depends(get_connection_profile_repository)
+]
+ConfigBackupRepo = Annotated[
+    ConfigBackupRepository, Depends(get_config_backup_repository)
 ]
 
 
@@ -158,6 +182,17 @@ def get_telegram_client() -> TelegramClient:
         backoff_seconds=settings.TELEGRAM_RETRY_BACKOFF_SECONDS,
         timeout_seconds=settings.TELEGRAM_TIMEOUT_SECONDS,
     )
+
+
+# --- Config-backup backends (stateless singletons) ---------------------------
+@lru_cache
+def get_napalm_backend() -> ConfigBackend:
+    return NapalmConfigBackend()
+
+
+@lru_cache
+def get_netmiko_backend() -> ConfigBackend:
+    return NetmikoConfigBackend()
 
 
 def _alert_default_thresholds() -> dict[AlertType, float]:
@@ -252,6 +287,27 @@ def get_telegram_admin_service(
     return TelegramAdminService(user_repo, chat_repo)
 
 
+def get_connection_profile_service(
+    profile_repo: ConnectionProfileRepo, device_repo: DeviceRepo
+) -> ConnectionProfileService:
+    return ConnectionProfileService(profile_repo, device_repo)
+
+
+def get_config_backup_service(
+    backup_repo: ConfigBackupRepo,
+    profile_repo: ConnectionProfileRepo,
+    device_repo: DeviceRepo,
+) -> ConfigBackupService:
+    return ConfigBackupService(
+        backup_repo=backup_repo,
+        profile_repo=profile_repo,
+        device_repo=device_repo,
+        napalm_backend=get_napalm_backend(),
+        netmiko_backend=get_netmiko_backend(),
+        ssh_timeout=settings.BACKUP_SSH_TIMEOUT_SECONDS,
+    )
+
+
 UserSvc = Annotated[UserService, Depends(get_user_service)]
 AuthSvc = Annotated[AuthService, Depends(get_auth_service)]
 DeviceSvc = Annotated[DeviceService, Depends(get_device_service)]
@@ -266,6 +322,12 @@ TelegramAdminSvc = Annotated[
     TelegramAdminService, Depends(get_telegram_admin_service)
 ]
 TelegramClientDep = Annotated[TelegramSender, Depends(get_telegram_client)]
+ConnectionProfileSvc = Annotated[
+    ConnectionProfileService, Depends(get_connection_profile_service)
+]
+ConfigBackupSvc = Annotated[
+    ConfigBackupService, Depends(get_config_backup_service)
+]
 
 
 # --- Current user / auth guards ----------------------------------------------

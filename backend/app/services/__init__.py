@@ -2,6 +2,7 @@
 
 from app.services.alerting import AlertingService
 from app.services.auth import AuthService
+from app.services.backup import ConfigBackupService, ConnectionProfileService
 from app.services.device import DeviceService
 from app.services.monitoring import MonitoringService
 from app.services.notifier import AlertNotifier
@@ -22,4 +23,6 @@ __all__ = [
     "TelegramCommandService",
     "TelegramUpdateDispatcher",
     "TelegramAdminService",
+    "ConnectionProfileService",
+    "ConfigBackupService",
 ]

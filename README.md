@@ -3,17 +3,14 @@
 A self-hosted Network Operations Platform (NetOps). This repository is being
 built **one phase at a time**.
 
-> **Status: Phase 3 — Telegram Alert System ✅**
-> Threshold/condition alerting engine (device offline/online, high CPU/memory/
-> disk/interface-utilization, packet loss) with alert **history**,
-> **acknowledgement**, **recovery** notifications, and severity-based **routing**
-> to Telegram chats. A Telegram bot serves `/help /status /devices /device
-> /alerts /critical`, with rate limiting, retries and logging. Built on the
-> Phase 1–2 foundation.
+> **Status: Phase 4 — Configuration Backup ✅**
+> Retrieve running/startup configs over SSH via **NAPALM** or **Netmiko**
+> (Paramiko), store **versioned** backups (deduplicated by content hash),
+> **diff** any two versions, and manage per-device SSH credentials **encrypted
+> at rest** (Fernet). Built on the Phase 1–3 foundation.
 
-Planned capabilities (future phases): Configuration Backup
-(Netmiko/Paramiko/NAPALM), Server Health Monitoring, an AI Troubleshooting
-Assistant, and a React/Tailwind dashboard.
+Planned capabilities (future phases): Server Health Monitoring, an AI
+Troubleshooting Assistant, and a React/Tailwind dashboard.
 
 ### Phase history
 
@@ -22,6 +19,7 @@ Assistant, and a React/Tailwind dashboard.
 | 1 | Project foundation: FastAPI, PostgreSQL, SQLAlchemy, Alembic, JWT/RBAC | ✅ |
 | 2 | Device inventory + network monitoring (SNMP & Zabbix) | ✅ |
 | 3 | Telegram alert system (routing, history, ack, recovery, bot commands) | ✅ |
+| 4 | Configuration backup (NAPALM/Netmiko, versioning, diff, encrypted creds) | ✅ |
 
 ---
 
@@ -122,6 +120,22 @@ the unavailable gauges left `null`, rather than aborting the poll.
 * **Triggering** — evaluation is exposed as `POST /alerts/evaluate[/{id}]`
   (Phase 2's polling is left untouched); a scheduler can call it periodically.
 
+### Configuration backup design (Phase 4)
+
+* **Pluggable backends** — `NapalmConfigBackend` and `NetmikoConfigBackend`
+  implement a `ConfigBackend` protocol; `napalm`/`netmiko` are imported lazily
+  and their **blocking** SSH sessions run in a worker thread
+  (`asyncio.to_thread`) bounded by a timeout, so the event loop is never blocked.
+* **Encrypted credentials** — a device's SSH username lives in a separate
+  `device_connection_profiles` table; the password/enable secret are encrypted
+  at rest with **Fernet** (`app/core/crypto.py`) and never serialized back.
+* **Versioning + dedup** — each successful pull is hashed (SHA-256); an
+  unchanged config does **not** create a new row, so `config_backups` is a clean
+  version history of actual changes. Failures are stored too (status `failed`
+  with the error) for auditability.
+* **Diff** — unified diff between any two backups, or the latest two for a
+  device.
+
 ---
 
 ## 2. Folder Structure
@@ -172,14 +186,18 @@ network-monitoring-system/
     │   │   ├── alerting.py      # AlertEvaluator + AlertingService     (Phase 3)
     │   │   ├── notifier.py      # severity-based alert routing         (Phase 3)
     │   │   └── telegram_bot.py  # commands + dispatcher + admin        (Phase 3)
+    │   ├── models/…/backup.py · schemas/backup.py · repositories/backup.py  (Phase 4)
+    │   ├── services/backup.py   # ConnectionProfile + ConfigBackup svc  (Phase 4)
+    │   ├── core/crypto.py       # Fernet secret encryption              (Phase 4)
     │   ├── monitoring/          # collector infrastructure            (Phase 2)
     │   │   ├── protocols.py · types.py · ping.py · snmp.py · zabbix.py
     │   ├── telegram/            # Telegram infrastructure              (Phase 3)
-    │   │   ├── protocols.py     # TelegramSender protocol
-    │   │   ├── client.py        # Bot API client (rate limit + retry)
-    │   │   ├── rate_limit.py    # global + per-chat limiter
+    │   │   ├── protocols.py · client.py · rate_limit.py
     │   │   ├── formatting.py    # HTML alert/recovery formatting
     │   │   └── poller.py        # long-polling worker (python -m ...)
+    │   ├── backup/              # SSH config backends                  (Phase 4)
+    │   │   ├── protocols.py     # ConfigBackend / ConnectionParams
+    │   │   ├── napalm_backend.py · netmiko_backend.py
     │   └── api/
     │       └── v1/
     │           ├── router.py
@@ -187,7 +205,8 @@ network-monitoring-system/
     │               ├── auth.py · users.py · health.py
     │               ├── devices.py · monitoring.py                     (Phase 2)
     │               ├── alerts.py      # rules/history/ack/evaluate    (Phase 3)
-    │               └── telegram.py    # webhook + users/chats admin   (Phase 3)
+    │               ├── telegram.py    # webhook + users/chats admin   (Phase 3)
+    │               └── backups.py     # profiles/backups/diff         (Phase 4)
     └── tests/
         ├── conftest.py            # in-memory repo/collector/sender fakes
         ├── test_*.py              # Phases 1–2 (security, services, api, …)
@@ -319,6 +338,19 @@ Migration `0003` adds five tables and four enums
 `alert_severity` (`info·warning·critical`) is a single shared enum used by
 rules, history, and chats.
 
+### Phase 4 tables
+
+Migration `0004` adds two tables and three enums (`connection_method`,
+`config_type`, `backup_status`):
+
+* **`device_connection_profiles`** — one per device (unique `device_id`, FK
+  CASCADE): `method` (`napalm`/`netmiko`), `platform`, `ssh_port`, `username`,
+  `password_encrypted`, `enable_secret_encrypted`, `is_active`.
+* **`config_backups`** — `device_id` (FK CASCADE), `config_type`
+  (`running`/`startup`), `method`, `status` (`success`/`failed`), `content`,
+  `content_hash`, `size_bytes`, `error`, `created_at`. Indexed on `device_id`,
+  `created_at`, and `(device_id, config_type)`.
+
 ---
 
 ## 4. API Endpoints
@@ -372,6 +404,19 @@ inventory writes are operational actions restricted to Admin/Operator.
 | PATCH  | `/api/v1/telegram/users/{id}` | Admin | Authorize/deactivate a user |
 | GET/POST | `/api/v1/telegram/chats` | Admin | List / register alert chats |
 | PATCH/DELETE | `/api/v1/telegram/chats/{id}` | Admin | Manage alert chats |
+
+### Phase 4 — configuration backup
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| PUT/GET/DELETE | `/api/v1/devices/{id}/connection` | Admin | Manage SSH connection profile (secrets hidden) |
+| POST   | `/api/v1/devices/{id}/backups` | Admin/Operator | Back up now (`?config_type=running\|startup`) |
+| POST   | `/api/v1/backups/run` | Admin/Operator | Back up all devices with an active profile |
+| GET    | `/api/v1/devices/{id}/backups` | any user | List a device's backups (metadata) |
+| GET    | `/api/v1/devices/{id}/backups/diff/latest` | Admin/Operator | Diff the last two successful backups |
+| GET    | `/api/v1/backups/{id}` | any user | Backup metadata |
+| GET    | `/api/v1/backups/{id}/content` | Admin/Operator | Full config text |
+| GET    | `/api/v1/backups/{id}/diff/{other_id}` | Admin/Operator | Diff two backups |
 
 Interactive docs are served at **`/docs`** (Swagger UI) and **`/redoc`**.
 
@@ -496,9 +541,13 @@ The unit tests cover:
   on `429`/`5xx`/network, the rate limiter (fake clock), HTML formatting, and
   the secret-gated webhook.
 
-Repositories, collectors and the Telegram sender are swapped for
-in-memory/preset fakes, so the whole **112-test** suite runs without Postgres,
-an SNMP agent, a Zabbix server, or the Telegram network.
+* **Backup (Phase 4):** secret encrypt/decrypt round-trip, connection-profile
+  upsert (encryption, secrets hidden), backup success/dedup/change/failure,
+  diff and diff-latest, and the backups API + RBAC (content restricted).
+
+Repositories, collectors, the Telegram sender and the SSH backend are swapped
+for in-memory/preset fakes, so the whole **127-test** suite runs without
+Postgres, an SNMP agent, a Zabbix server, the Telegram network, or SSH access.
 
 ---
 
@@ -578,11 +627,21 @@ an SNMP agent, a Zabbix server, or the Telegram network.
     snapshots; interface utilization is derived from two snapshots; disk is a
     defined type left inert (no disk metric is collected yet) rather than faked.
 
+### Phase 4 additions
+
+25. **Secrets encrypted at rest.** SSH passwords/enable secrets are Fernet-
+    encrypted in a dedicated table and never serialized — Phase 2's `Device`
+    model is untouched.
+26. **Blocking I/O off the loop.** Synchronous NAPALM/Netmiko sessions run in a
+    worker thread with a timeout, so a hung SSH connection can't stall the API.
+27. **Config versioning by hash.** Unchanged configs don't create new rows, so
+    history is a meaningful change-log; failed attempts are recorded for audit.
+
 ---
 
 ## 8. Next Steps
 
-Phase 3 is complete. **Awaiting approval before starting Phase 4** (Configuration
-Backup with Netmiko/Paramiko/NAPALM). Deferred follow-ups (until requested):
-a scheduler to run polling + evaluation automatically, per-rule flap dampening
-(consecutive breaches), disk metric collection, and per-chat/per-rule routing.
+Phases 1–4 are complete; Phases 5–7 (Server Health Monitoring, AI Troubleshooting
+Assistant, React/Tailwind dashboard) follow. Deferred follow-ups (until
+requested): a scheduler to run polling/evaluation/backups automatically, per-rule
+flap dampening, disk metric collection, and config restore.
