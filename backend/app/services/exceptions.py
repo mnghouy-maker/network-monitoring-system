@@ -36,3 +36,7 @@ class AlertError(ServiceError):
 
 class BackupError(ServiceError):
     """Raised when a configuration backup cannot be performed as requested."""
+
+
+class AIError(ServiceError):
+    """Raised when the AI troubleshooting assistant cannot answer a request."""

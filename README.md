@@ -3,14 +3,16 @@
 A self-hosted Network Operations Platform (NetOps). This repository is being
 built **one phase at a time**.
 
-> **Status: Phase 5 — Server Health Monitoring ✅**
-> Monitor server CPU / memory / disk / load / uptime via **local psutil** (the
-> host running the platform) or **SSH** (remote hosts), classify each snapshot
-> against warn/crit **thresholds** (healthy/warning/critical/unreachable), and
-> keep history. Built on the Phase 1–4 foundation.
+> **Status: Phase 6 — AI Troubleshooting Assistant ✅**
+> A Claude-powered assistant that grounds its answers in **live platform
+> telemetry**: point a session at a device, a server, or the whole platform and
+> it pulls the latest metrics, active alerts, health snapshots and backup
+> metadata into the prompt, then diagnoses issues and suggests concrete next
+> steps. Conversations are persisted and resumable; the assistant is disabled
+> gracefully (HTTP 503) when no API key is configured. Built on the Phase 1–5
+> foundation.
 
-Planned capabilities (future phases): an AI Troubleshooting Assistant and a
-React/Tailwind dashboard.
+Planned capabilities (future phases): a React/Tailwind web dashboard.
 
 ### Phase history
 
@@ -21,6 +23,7 @@ React/Tailwind dashboard.
 | 3 | Telegram alert system (routing, history, ack, recovery, bot commands) | ✅ |
 | 4 | Configuration backup (NAPALM/Netmiko, versioning, diff, encrypted creds) | ✅ |
 | 5 | Server health monitoring (local psutil / SSH, thresholds, history) | ✅ |
+| 6 | AI troubleshooting assistant (Claude, context-grounded, chat history) | ✅ |
 
 ---
 
@@ -149,6 +152,27 @@ the unavailable gauges left `null`, rather than aborting the poll.
   stores a `server_health_checks` snapshot with the computed status.
 * Server SSH passwords are encrypted at rest with the same Fernet helper.
 
+### AI troubleshooting design (Phase 6)
+
+* **Provider seam** — the service depends only on an `AIProvider` protocol.
+  `AnthropicProvider` lazy-imports the official `anthropic` SDK, streams the
+  request and resolves it with `get_final_message()` (avoiding timeouts on long
+  answers), and uses **adaptive extended thinking** for stronger diagnostics.
+  Tests inject a `FakeAIProvider`, so the suite never touches the network.
+* **Context grounding** — every turn rebuilds a fresh context block from live
+  data. A **device** session pulls the device record, latest metric, active
+  alerts and latest successful backup; a **server** session pulls the latest
+  health snapshot; a **general** session summarises inventory counts and active
+  alerts. Context gathering is best-effort — a failing source degrades to a note
+  rather than breaking the chat.
+* **Persisted conversations** — `ai_sessions` / `ai_messages` store the full
+  history (with per-reply model and token accounting); the last _N_ turns are
+  replayed to the model so sessions are resumable.
+* **Disabled gracefully** — with no `ANTHROPIC_API_KEY`, `is_configured` is
+  false: chat endpoints return `503` and `/ai/status` reports `enabled: false`.
+  Subject references are stored without a foreign key so a session survives its
+  device/server being deleted.
+
 ---
 
 ## 2. Folder Structure
@@ -211,6 +235,14 @@ network-monitoring-system/
     │   ├── backup/              # SSH config backends                  (Phase 4)
     │   │   ├── protocols.py     # ConfigBackend / ConnectionParams
     │   │   ├── napalm_backend.py · netmiko_backend.py
+    │   ├── health/              # server health collectors            (Phase 5)
+    │   │   ├── protocols.py · local.py (psutil) · ssh.py
+    │   ├── models/…/server.py · services/server_health.py             (Phase 5)
+    │   ├── ai/                  # LLM provider infrastructure         (Phase 6)
+    │   │   ├── protocols.py     # AIProvider / ChatTurn / AICompletion
+    │   │   └── anthropic_provider.py   # lazy anthropic SDK, streaming
+    │   ├── models/ai.py · schemas/ai.py · repositories/ai.py          (Phase 6)
+    │   ├── services/troubleshooting.py # context-grounded assistant   (Phase 6)
     │   └── api/
     │       └── v1/
     │           ├── router.py
@@ -219,7 +251,9 @@ network-monitoring-system/
     │               ├── devices.py · monitoring.py                     (Phase 2)
     │               ├── alerts.py      # rules/history/ack/evaluate    (Phase 3)
     │               ├── telegram.py    # webhook + users/chats admin   (Phase 3)
-    │               └── backups.py     # profiles/backups/diff         (Phase 4)
+    │               ├── backups.py     # profiles/backups/diff         (Phase 4)
+    │               ├── servers.py     # inventory + health poll       (Phase 5)
+    │               └── ai.py          # sessions/messages/diagnose    (Phase 6)
     └── tests/
         ├── conftest.py            # in-memory repo/collector/sender fakes
         ├── test_*.py              # Phases 1–2 (security, services, api, …)
@@ -227,6 +261,10 @@ network-monitoring-system/
         ├── test_telegram_command.py · test_telegram_dispatcher.py     # (Phase 3)
         ├── test_telegram_client.py · test_rate_limiter.py            # (Phase 3)
         ├── test_telegram_formatting.py · test_alerts_api.py           # (Phase 3)
+        ├── test_crypto.py · test_backup_service.py · test_backups_api.py  # (Phase 4)
+        ├── test_health_ssh_parse.py · test_server_health_service.py   # (Phase 5)
+        ├── test_servers_api.py                                        # (Phase 5)
+        ├── test_troubleshooting_service.py · test_ai_api.py           # (Phase 6)
 ```
 
 ---
@@ -376,6 +414,17 @@ Migration `0005` adds two tables and two enums (`server_monitor_method`,
   `reachable`, `status`, `cpu_percent`, `memory_percent`, `disk_percent`,
   `load1/5/15`, `uptime_seconds`, `error`.
 
+### Phase 6 tables
+
+Migration `0006` adds two tables and two enums (`ai_subject_type`,
+`ai_message_role`):
+
+* **`ai_sessions`** — `title`, `subject_type` (`device`/`server`/`general`),
+  `subject_id` (loose reference, no FK, indexed), `created_at`, `updated_at`.
+* **`ai_messages`** — `session_id` (FK CASCADE), `role` (`user`/`assistant`),
+  `content`, and for assistant turns `model`, `input_tokens`, `output_tokens`,
+  `created_at`. Indexed on `session_id` and `created_at`.
+
 ---
 
 ## 4. API Endpoints
@@ -453,6 +502,20 @@ inventory writes are operational actions restricted to Admin/Operator.
 | POST   | `/api/v1/servers/health/poll-all` | Admin/Operator | Poll all active servers |
 | GET    | `/api/v1/servers/{id}/health/latest` | any user | Latest health snapshot |
 | GET    | `/api/v1/servers/{id}/health/history` | any user | Health history |
+
+### Phase 6 — AI troubleshooting assistant
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET    | `/api/v1/ai/status` | any user | Whether the assistant is configured |
+| GET    | `/api/v1/ai/sessions` | any user | List troubleshooting sessions |
+| POST   | `/api/v1/ai/sessions` | Admin/Operator | Open a session (device/server/general) |
+| GET    | `/api/v1/ai/sessions/{id}` | any user | Session with full message history |
+| DELETE | `/api/v1/ai/sessions/{id}` | Admin/Operator | Delete a session |
+| POST   | `/api/v1/ai/sessions/{id}/messages` | Admin/Operator | Send a message, get the reply |
+| POST   | `/api/v1/ai/diagnose` | Admin/Operator | One-shot: open a session + first reply |
+
+Chat/diagnose calls return **`503`** when `ANTHROPIC_API_KEY` is unset.
 
 Interactive docs are served at **`/docs`** (Swagger UI) and **`/redoc`**.
 
@@ -585,9 +648,15 @@ The unit tests cover:
   (healthy/warning/critical/unreachable), poll-and-store, and the servers API +
   RBAC (SSH secret hidden).
 
-Repositories, collectors, the Telegram sender and the SSH/health backends are
-swapped for in-memory/preset fakes, so the whole **141-test** suite runs without
-Postgres, SNMP, Zabbix, Telegram, SSH, or psutil.
+* **AI assistant (Phase 6):** session/message persistence, subject validation,
+  context grounding (device metrics/alerts flow into the system prompt), chat
+  history replay, the disabled/`503` path when unconfigured, and the AI API +
+  RBAC — all against a `FakeAIProvider`, so no network or API key is needed.
+
+Repositories, collectors, the Telegram sender, the SSH/health backends and the
+AI provider are swapped for in-memory/preset fakes, so the whole **151-test**
+suite runs without Postgres, SNMP, Zabbix, Telegram, SSH, psutil, or the
+Anthropic API.
 
 ---
 
@@ -677,11 +746,35 @@ Postgres, SNMP, Zabbix, Telegram, SSH, or psutil.
 27. **Config versioning by hash.** Unchanged configs don't create new rows, so
     history is a meaningful change-log; failed attempts are recorded for audit.
 
+### Phase 5 additions
+
+28. **One collector protocol, two hosts.** Local (psutil) and remote (SSH)
+    health share a `HealthCollector` seam; the SSH collector runs a single
+    shell snippet and parses `key=value` lines, so parsing is pure and tested.
+29. **Classification is a pure function.** `classify_health` maps a sample to
+    healthy/warning/critical/unreachable against warn/crit thresholds — no I/O,
+    exhaustively unit-tested; an unreachable poll is a stored snapshot, not an
+    exception.
+
+### Phase 6 additions
+
+30. **Provider behind a protocol.** The assistant depends only on `AIProvider`;
+    `AnthropicProvider` lazy-imports the SDK, streams, and uses adaptive
+    thinking. Tests inject a fake — no key, no network — and swapping providers
+    never touches the service.
+31. **Answers grounded in live telemetry.** Each turn rebuilds context from the
+    real repositories (metrics, alerts, health, backups) so the model reasons
+    over current state, not stale text; context gathering is best-effort and
+    degrades to a note on failure.
+32. **Fails closed, not loud.** With no API key the assistant reports disabled
+    and chat returns `503`; sessions reference their subject without a FK so a
+    conversation outlives the device/server it discussed.
+
 ---
 
 ## 8. Next Steps
 
-Phases 1–5 are complete; Phases 6–7 (AI Troubleshooting Assistant, React/Tailwind
-dashboard) follow. Deferred follow-ups (until requested): a scheduler to run
+Phases 1–6 are complete; Phase 7 (React/Tailwind web dashboard) follows.
+Deferred follow-ups (until requested): a scheduler to run
 polling/evaluation/backups/health-checks automatically, wiring server-health
 transitions into the alerting engine, per-rule flap dampening, and config restore.

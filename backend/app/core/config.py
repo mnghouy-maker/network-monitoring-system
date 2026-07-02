@@ -117,6 +117,16 @@ class Settings(BaseSettings):
     SERVER_DISK_WARN: float = 80.0
     SERVER_DISK_CRIT: float = 95.0
 
+    # --- AI troubleshooting assistant (Phase 6) ---------------------------
+    # Leave ANTHROPIC_API_KEY empty to disable the assistant entirely; the
+    # /ai chat endpoints then return 503. AI_MODEL selects the Claude model.
+    ANTHROPIC_API_KEY: str | None = None
+    AI_MODEL: str = "claude-opus-4-8"
+    AI_MAX_TOKENS: int = 2048
+    AI_TIMEOUT_SECONDS: float = 60.0
+    # Trailing chat turns replayed to the model as conversation history.
+    AI_MAX_HISTORY_MESSAGES: int = 20
+
     # --- Database ---------------------------------------------------------
     POSTGRES_SERVER: str = "db"
     POSTGRES_PORT: int = 5432

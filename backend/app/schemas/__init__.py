@@ -1,5 +1,13 @@
 """Pydantic schemas (request/response contracts)."""
 
+from app.schemas.ai import (
+    AIChatRequest,
+    AIDiagnoseRequest,
+    AIMessageOut,
+    AISessionCreate,
+    AISessionDetailOut,
+    AISessionOut,
+)
 from app.schemas.device import DeviceCreate, DeviceOut, DeviceUpdate
 from app.schemas.metric import DeviceMetricOut, InterfaceStatOut
 from app.schemas.token import Token, TokenPayload, TokenRefreshRequest
@@ -21,4 +29,10 @@ __all__ = [
     "DeviceUpdate",
     "DeviceMetricOut",
     "InterfaceStatOut",
+    "AISessionCreate",
+    "AISessionOut",
+    "AISessionDetailOut",
+    "AIMessageOut",
+    "AIChatRequest",
+    "AIDiagnoseRequest",
 ]

@@ -17,7 +17,9 @@ import pytest
 # Provide a SECRET_KEY before app modules import settings.
 os.environ.setdefault("SECRET_KEY", "test-secret-key-not-for-production")
 
+from app.ai.protocols import AICompletion, ChatTurn  # noqa: E402
 from app.health.protocols import HealthSample  # noqa: E402
+from app.models.ai import AIMessage, AISession  # noqa: E402
 from app.models.alert import (  # noqa: E402
     AlertAcknowledgement,
     AlertHistory,
@@ -649,3 +651,95 @@ def fake_server_repo() -> FakeServerRepository:
 @pytest.fixture
 def fake_server_health_repo() -> FakeServerHealthRepository:
     return FakeServerHealthRepository()
+
+
+# --- Phase 6 fakes: AI troubleshooting assistant -----------------------------
+class FakeAISessionRepository:
+    def __init__(self) -> None:
+        self._by_id: dict[uuid.UUID, AISession] = {}
+
+    async def get(self, session_id: uuid.UUID) -> AISession | None:
+        return self._by_id.get(session_id)
+
+    async def list(
+        self, *, skip: int = 0, limit: int = 100
+    ) -> list[AISession]:
+        items = sorted(
+            self._by_id.values(), key=lambda s: s.updated_at, reverse=True
+        )
+        return items[skip : skip + limit]
+
+    async def add(self, session: AISession) -> AISession:
+        if session.id is None:
+            session.id = uuid.uuid4()
+        _apply_timestamps(session)
+        self._by_id[session.id] = session
+        return session
+
+    async def touch(self, session: AISession) -> AISession:
+        session.updated_at = datetime.now(UTC)
+        self._by_id[session.id] = session
+        return session
+
+    async def delete(self, session: AISession) -> None:
+        self._by_id.pop(session.id, None)
+
+
+class FakeAIMessageRepository:
+    def __init__(self) -> None:
+        self._items: list[AIMessage] = []
+
+    async def add(self, message: AIMessage) -> AIMessage:
+        if message.id is None:
+            message.id = uuid.uuid4()
+        if message.created_at is None:
+            message.created_at = datetime.now(UTC)
+        self._items.append(message)
+        return message
+
+    async def list_for_session(
+        self, session_id: uuid.UUID, *, skip: int = 0, limit: int = 200
+    ) -> list[AIMessage]:
+        matches = [m for m in self._items if m.session_id == session_id]
+        return matches[skip : skip + limit]
+
+
+class FakeAIProvider:
+    """Echoes a canned reply; records the calls instead of hitting the API."""
+
+    def __init__(
+        self, reply: str = "Here is my assessment.", configured: bool = True
+    ) -> None:
+        self._reply = reply
+        self._configured = configured
+        self.calls: list[tuple[str, list[ChatTurn], int]] = []
+
+    @property
+    def is_configured(self) -> bool:
+        return self._configured
+
+    async def complete(
+        self, *, system: str, messages, max_tokens: int
+    ) -> AICompletion:
+        self.calls.append((system, list(messages), max_tokens))
+        return AICompletion(
+            text=self._reply,
+            model="fake-model",
+            input_tokens=10,
+            output_tokens=20,
+        )
+
+
+@pytest.fixture
+def fake_ai_session_repo() -> FakeAISessionRepository:
+    return FakeAISessionRepository()
+
+
+@pytest.fixture
+def fake_ai_message_repo() -> FakeAIMessageRepository:
+    return FakeAIMessageRepository()
+
+
+@pytest.fixture
+def fake_ai_provider() -> FakeAIProvider:
+    return FakeAIProvider()

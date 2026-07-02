@@ -4,6 +4,12 @@ Importing the models here ensures they are registered on ``Base.metadata``
 when this package is imported (e.g. by Alembic's ``env.py``).
 """
 
+from app.models.ai import (
+    AIMessage,
+    AIMessageRole,
+    AISession,
+    AISubjectType,
+)
 from app.models.alert import (
     AlertAcknowledgement,
     AlertHistory,
@@ -57,4 +63,8 @@ __all__ = [
     "ServerHealthCheck",
     "ServerMonitorMethod",
     "ServerHealthStatus",
+    "AISession",
+    "AIMessage",
+    "AISubjectType",
+    "AIMessageRole",
 ]

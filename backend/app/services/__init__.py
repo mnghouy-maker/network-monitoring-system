@@ -12,6 +12,7 @@ from app.services.telegram_bot import (
     TelegramCommandService,
     TelegramUpdateDispatcher,
 )
+from app.services.troubleshooting import TroubleshootingService
 from app.services.user import UserService
 
 __all__ = [
@@ -28,4 +29,5 @@ __all__ = [
     "ConfigBackupService",
     "ServerService",
     "ServerHealthService",
+    "TroubleshootingService",
 ]

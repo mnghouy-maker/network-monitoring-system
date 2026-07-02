@@ -1,5 +1,6 @@
 """Repository layer: encapsulates all database access."""
 
+from app.repositories.ai import AIMessageRepository, AISessionRepository
 from app.repositories.alert import (
     AlertAcknowledgementRepository,
     AlertHistoryRepository,
@@ -31,4 +32,6 @@ __all__ = [
     "ConfigBackupRepository",
     "ServerRepository",
     "ServerHealthRepository",
+    "AISessionRepository",
+    "AIMessageRepository",
 ]

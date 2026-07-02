@@ -15,6 +15,8 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.ai.anthropic_provider import AnthropicProvider
+from app.ai.protocols import AIProvider
 from app.backup.napalm_backend import NapalmConfigBackend
 from app.backup.netmiko_backend import NetmikoConfigBackend
 from app.backup.protocols import ConfigBackend
@@ -30,6 +32,7 @@ from app.monitoring.ping import SubprocessPingCollector
 from app.monitoring.protocols import MetricCollector, PingCollector
 from app.monitoring.snmp import SnmpMetricCollector
 from app.monitoring.zabbix import ZabbixMetricCollector
+from app.repositories.ai import AIMessageRepository, AISessionRepository
 from app.repositories.alert import (
     AlertAcknowledgementRepository,
     AlertHistoryRepository,
@@ -63,6 +66,7 @@ from app.services.telegram_bot import (
     TelegramCommandService,
     TelegramUpdateDispatcher,
 )
+from app.services.troubleshooting import TroubleshootingService
 from app.services.user import UserService
 from app.telegram.client import TelegramClient
 from app.telegram.protocols import TelegramSender
@@ -130,6 +134,14 @@ def get_server_health_repository(session: DbSession) -> ServerHealthRepository:
     return ServerHealthRepository(session)
 
 
+def get_ai_session_repository(session: DbSession) -> AISessionRepository:
+    return AISessionRepository(session)
+
+
+def get_ai_message_repository(session: DbSession) -> AIMessageRepository:
+    return AIMessageRepository(session)
+
+
 UserRepo = Annotated[UserRepository, Depends(get_user_repository)]
 DeviceRepo = Annotated[DeviceRepository, Depends(get_device_repository)]
 MetricRepo = Annotated[MetricRepository, Depends(get_metric_repository)]
@@ -157,6 +169,12 @@ ConfigBackupRepo = Annotated[
 ServerRepo = Annotated[ServerRepository, Depends(get_server_repository)]
 ServerHealthRepo = Annotated[
     ServerHealthRepository, Depends(get_server_health_repository)
+]
+AISessionRepo = Annotated[
+    AISessionRepository, Depends(get_ai_session_repository)
+]
+AIMessageRepo = Annotated[
+    AIMessageRepository, Depends(get_ai_message_repository)
 ]
 
 
@@ -214,6 +232,16 @@ def get_napalm_backend() -> ConfigBackend:
 @lru_cache
 def get_netmiko_backend() -> ConfigBackend:
     return NetmikoConfigBackend()
+
+
+# --- AI provider (process-wide singleton; lazily creates the SDK client) ------
+@lru_cache
+def get_ai_provider() -> AIProvider:
+    return AnthropicProvider(
+        api_key=settings.ANTHROPIC_API_KEY,
+        model=settings.AI_MODEL,
+        timeout_seconds=settings.AI_TIMEOUT_SECONDS,
+    )
 
 
 # --- Server health collectors (stateless singletons) -------------------------
@@ -368,6 +396,32 @@ def get_server_health_service(
     )
 
 
+def get_troubleshooting_service(
+    session_repo: AISessionRepo,
+    message_repo: AIMessageRepo,
+    device_repo: DeviceRepo,
+    metric_repo: MetricRepo,
+    alert_repo: AlertHistoryRepo,
+    server_repo: ServerRepo,
+    server_health_repo: ServerHealthRepo,
+    backup_repo: ConfigBackupRepo,
+) -> TroubleshootingService:
+    return TroubleshootingService(
+        session_repo=session_repo,
+        message_repo=message_repo,
+        provider=get_ai_provider(),
+        device_repo=device_repo,
+        metric_repo=metric_repo,
+        alert_repo=alert_repo,
+        server_repo=server_repo,
+        server_health_repo=server_health_repo,
+        backup_repo=backup_repo,
+        model=settings.AI_MODEL,
+        max_tokens=settings.AI_MAX_TOKENS,
+        max_history=settings.AI_MAX_HISTORY_MESSAGES,
+    )
+
+
 UserSvc = Annotated[UserService, Depends(get_user_service)]
 AuthSvc = Annotated[AuthService, Depends(get_auth_service)]
 DeviceSvc = Annotated[DeviceService, Depends(get_device_service)]
@@ -391,6 +445,9 @@ ConfigBackupSvc = Annotated[
 ServerSvc = Annotated[ServerService, Depends(get_server_service)]
 ServerHealthSvc = Annotated[
     ServerHealthService, Depends(get_server_health_service)
+]
+TroubleshootingSvc = Annotated[
+    TroubleshootingService, Depends(get_troubleshooting_service)
 ]
 
 
